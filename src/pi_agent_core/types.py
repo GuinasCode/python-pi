@@ -19,7 +19,6 @@ from pi_ai import (
     ModelThinkingLevel,
     SimpleStreamOptions,
     TextContent,
-    ThinkingBudgets,
     Tool,
     ToolCall,
     ToolResultMessage,
@@ -93,7 +92,7 @@ class BeforeToolCallContext:
     assistant_message: AssistantMessage
     tool_call: AgentToolCall
     args: Any
-    context: "AgentContext"
+    context: AgentContext
 
 
 @dataclass
@@ -103,9 +102,9 @@ class AfterToolCallContext:
     assistant_message: AssistantMessage
     tool_call: AgentToolCall
     args: Any
-    result: "AgentToolResult[Any]"
+    result: AgentToolResult[Any]
     is_error: bool
-    context: "AgentContext"
+    context: AgentContext
 
 
 @dataclass
@@ -114,8 +113,8 @@ class ShouldStopAfterTurnContext:
 
     message: AssistantMessage
     tool_results: list[ToolResultMessage]
-    context: "AgentContext"
-    new_messages: list["AgentMessage"]
+    context: AgentContext
+    new_messages: list[AgentMessage]
 
 
 @dataclass
@@ -127,7 +126,7 @@ class PrepareNextTurnContext(ShouldStopAfterTurnContext):
 class AgentLoopTurnUpdate:
     """Replacement runtime state used before starting another provider request."""
 
-    context: "AgentContext | None" = None
+    context: AgentContext | None = None
     model: Model | None = None
     thinking_level: ThinkingLevel | None = None
 
@@ -162,10 +161,13 @@ class AgentTool(Tool):
 
     label: str = ""
     prepare_arguments: Callable[[Any], Any] | None = None
-    execute: Callable[
-        [str, Any, Any, AgentToolUpdateCallback],
-        Awaitable[AgentToolResult],
-    ] | None = None
+    execute: (
+        Callable[
+            [str, Any, Any, AgentToolUpdateCallback],
+            Awaitable[AgentToolResult],
+        ]
+        | None
+    ) = None
     execution_mode: ToolExecutionMode | None = None
 
 
@@ -384,6 +386,10 @@ _DEFAULT_MODEL = Model(
 EMPTY_USAGE = Usage()
 
 __all__ = [
+    "EMPTY_USAGE",
+    "AfterToolCallContext",
+    "AfterToolCallFn",
+    "AfterToolCallResult",
     "AgentContext",
     "AgentEndEvent",
     "AgentEvent",
@@ -398,9 +404,6 @@ __all__ = [
     "AgentToolResult",
     "AgentToolUpdateCallback",
     "AssistantMessageEventStream",
-    "AfterToolCallContext",
-    "AfterToolCallFn",
-    "AfterToolCallResult",
     "BeforeToolCallContext",
     "BeforeToolCallFn",
     "BeforeToolCallResult",
@@ -425,5 +428,4 @@ __all__ = [
     "TransformContextFn",
     "TurnEndEvent",
     "TurnStartEvent",
-    "EMPTY_USAGE",
 ]

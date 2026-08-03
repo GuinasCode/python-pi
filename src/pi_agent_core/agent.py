@@ -6,17 +6,17 @@ Mirrors ``packages/agent/src/agent.ts``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from pi_ai import (
     AssistantMessage,
     ImageContent,
     Message,
     Model,
-    SimpleStreamOptions,
     StopReason,
     TextContent,
     ThinkingBudgets,
@@ -27,9 +27,9 @@ from pi_ai import (
 from .agent_loop import run_agent_loop, run_agent_loop_continue
 from .stream_fn import get_default_stream_fn
 from .types import (
-    AfterToolCallContext,
+    _DEFAULT_MODEL,
+    EMPTY_USAGE,
     AfterToolCallFn,
-    AfterToolCallResult,
     AgentContext,
     AgentEndEvent,
     AgentEvent,
@@ -37,9 +37,7 @@ from .types import (
     AgentMessage,
     AgentState,
     AgentTool,
-    BeforeToolCallContext,
     BeforeToolCallFn,
-    BeforeToolCallResult,
     ConvertToLlmFn,
     GetApiKeyFn,
     MessageEndEvent,
@@ -55,8 +53,6 @@ from .types import (
     ToolExecutionStartEvent,
     TransformContextFn,
     TurnEndEvent,
-    _DEFAULT_MODEL,
-    EMPTY_USAGE,
 )
 
 __all__ = ["Agent", "AgentOptions", "create_mutable_agent_state"]
@@ -79,7 +75,7 @@ class AgentOptions:
     on_response: Callable[[Any, Any], None] | None = None
     before_tool_call: BeforeToolCallFn | None = None
     after_tool_call: AfterToolCallFn | None = None
-    prepare_next_turn: PrepareNextTurnSignalFn | None = None
+    prepare_next_turn: PrepareNextTurnFn | None = None
     prepare_next_turn_with_context: PrepareNextTurnFn | None = None
     steering_mode: QueueMode = "one-at-a-time"
     follow_up_mode: QueueMode = "one-at-a-time"
@@ -170,6 +166,13 @@ class _ActiveRun:
     aborted: bool = False
 
 
+async def _maybe_await(value: Any) -> Any:
+    """Await value if it's awaitable, otherwise return it directly."""
+    if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
+        return await value
+    return value
+
+
 class Agent:
     """Stateful wrapper around the low-level agent loop.
 
@@ -211,10 +214,8 @@ class Agent:
             nonlocal removed
             if not removed:
                 removed = True
-                try:
+                with contextlib.suppress(ValueError):
                     self._listeners.remove(listener)
-                except ValueError:
-                    pass
 
         return unsubscribe
 
@@ -301,14 +302,22 @@ class Agent:
 
     # --- Public actions ---
 
-    async def start(self, message: str | AgentMessage | list[AgentMessage], images: list[ImageContent] | None = None) -> None:
+    async def start(
+        self,
+        message: str | AgentMessage | list[AgentMessage],
+        images: list[ImageContent] | None = None,
+    ) -> None:
         """Start a new prompt from text, a single message, or a batch of messages.
 
         Alias for :meth:`prompt`.
         """
         await self.prompt(message, images)
 
-    async def prompt(self, input: str | AgentMessage | list[AgentMessage], images: list[ImageContent] | None = None) -> None:
+    async def prompt(
+        self,
+        input: str | AgentMessage | list[AgentMessage],
+        images: list[ImageContent] | None = None,
+    ) -> None:
         """Start a new prompt from text, a single message, or a batch of messages."""
         if self._active_run is not None:
             raise RuntimeError(
@@ -439,7 +448,9 @@ class Agent:
             tool_execution=self.tool_execution,
             before_tool_call=self.before_tool_call,
             after_tool_call=self.after_tool_call,
-            prepare_next_turn=_prepare_next_turn if (self.prepare_next_turn or self.prepare_next_turn_with_context) else None,
+            prepare_next_turn=(
+                _prepare_next_turn if (self.prepare_next_turn or self.prepare_next_turn_with_context) else None
+            ),
             convert_to_llm=self.convert_to_llm,
             transform_context=self.transform_context,
             get_api_key=self.get_api_key,
@@ -460,7 +471,7 @@ class Agent:
 
         try:
             await executor(active_run.abort_event)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             await self._handle_run_failure(error, active_run.aborted)
         finally:
             self._finish_run()
@@ -491,9 +502,7 @@ class Agent:
 
     async def _process_events(self, event: AgentEvent) -> None:
         """Reduce internal state for a loop event, then await listeners."""
-        if isinstance(event, MessageStartEvent):
-            self._state.streaming_message = event.message
-        elif isinstance(event, MessageUpdateEvent):
+        if isinstance(event, (MessageStartEvent, MessageUpdateEvent)):
             self._state.streaming_message = event.message
         elif isinstance(event, MessageEndEvent):
             self._state.streaming_message = None
@@ -504,10 +513,7 @@ class Agent:
         elif isinstance(event, ToolExecutionEndEvent):
             self._state.pending_tool_calls.discard(event.tool_call_id)
         elif isinstance(event, TurnEndEvent):
-            if (
-                isinstance(event.message, AssistantMessage)
-                and event.message.error_message is not None
-            ):
+            if isinstance(event.message, AssistantMessage) and event.message.error_message is not None:
                 self._state.error_message = event.message.error_message
         elif isinstance(event, AgentEndEvent):
             self._state.streaming_message = None

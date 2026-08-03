@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .types import StreamFn
 
-_default_stream_fn: "StreamFn | None" = None
+_default_stream_fn: StreamFn | None = None
 
 
-def set_default_stream_fn(stream_fn: "StreamFn | None") -> None:
+def set_default_stream_fn(stream_fn: StreamFn | None) -> None:
     """Configure the fallback used by Agent and low-level loops when callers omit stream_fn.
 
     Hosts that provide a default model runtime can install its stream function here
@@ -20,7 +20,7 @@ def set_default_stream_fn(stream_fn: "StreamFn | None") -> None:
     _default_stream_fn = stream_fn
 
 
-def get_default_stream_fn() -> "StreamFn":
+def get_default_stream_fn() -> StreamFn:
     """Return the configured default stream function.
 
     Raises:

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +24,7 @@ from pi_ai import (
 )
 
 from .types import (
+    AfterToolCallContext,
     AgentContext,
     AgentEndEvent,
     AgentEvent,
@@ -33,7 +33,6 @@ from .types import (
     AgentMessage,
     AgentToolCall,
     AgentToolResult,
-    AfterToolCallContext,
     BeforeToolCallContext,
     MessageEndEvent,
     MessageStartEvent,
@@ -47,7 +46,7 @@ from .types import (
     TurnStartEvent,
 )
 
-__all__ = ["run_agent_loop", "run_agent_loop_continue", "AgentEventSink"]
+__all__ = ["AgentEventSink", "run_agent_loop", "run_agent_loop_continue"]
 
 
 def _now_ms() -> int:
@@ -168,9 +167,7 @@ async def _run_loop(
                 pending_messages = []
 
             # Stream assistant response
-            message = await _stream_assistant_response(
-                current_context, config, signal, emit, stream_function
-            )
+            message = await _stream_assistant_response(current_context, config, signal, emit, stream_function)
             new_messages.append(message)
 
             if message.stop_reason in (StopReason.ERROR, StopReason.ABORTED):
@@ -187,9 +184,7 @@ async def _run_loop(
                 if message.stop_reason == StopReason.LENGTH:
                     executed_batch = await _fail_tool_calls_from_truncated_message(tool_calls, emit)
                 else:
-                    executed_batch = await _execute_tool_calls(
-                        current_context, message, config, signal, emit
-                    )
+                    executed_batch = await _execute_tool_calls(current_context, message, config, signal, emit)
                 tool_results.extend(executed_batch.messages)
                 has_more_tool_calls = not executed_batch.terminate
 
@@ -399,9 +394,7 @@ async def _execute_tool_calls(
     can be layered in later without changing the event sequence.
     """
     tool_calls = [c for c in assistant_message.content if getattr(c, "type", None) == "toolCall"]
-    return await _execute_tool_calls_sequential(
-        current_context, assistant_message, tool_calls, config, signal, emit
-    )
+    return await _execute_tool_calls_sequential(current_context, assistant_message, tool_calls, config, signal, emit)
 
 
 def _find_tool(tools: list[Any] | None, name: str) -> Any | None:
@@ -445,9 +438,7 @@ async def _execute_tool_calls_sequential(
             ),
         )
 
-        preparation = await _prepare_tool_call(
-            current_context, assistant_message, tool_call, config, signal
-        )
+        preparation = await _prepare_tool_call(current_context, assistant_message, tool_call, config, signal)
         if preparation["kind"] == "immediate":
             finalized = {
                 "tool_call": tool_call,
@@ -547,7 +538,7 @@ async def _prepare_tool_call(
             "tool": tool,
             "args": validated_args,
         }
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         return {
             "kind": "immediate",
             "result": _create_error_tool_result(str(error)),
@@ -580,7 +571,7 @@ async def _execute_prepared_tool_call(
             }
         result = await tool.execute(tool_call.id, args, signal, None)
         return {"result": result, "is_error": False}
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         return {
             "result": _create_error_tool_result(str(error)),
             "is_error": True,
@@ -624,7 +615,7 @@ async def _finalize_executed_tool_call(
                     result.terminate = after_result.terminate
                 if after_result.is_error is not None:
                     is_error = after_result.is_error
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             result = _create_error_tool_result(str(error))
             is_error = True
 
