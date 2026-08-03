@@ -146,8 +146,7 @@ def parse_args(args: Sequence[str]) -> Args:
                     {
                         "type": "warning",
                         "message": (
-                            f'Invalid thinking level "{level}".'
-                            f" Valid values: {', '.join(VALID_THINKING_LEVELS)}"
+                            f'Invalid thinking level "{level}". Valid values: {", ".join(VALID_THINKING_LEVELS)}'
                         ),
                     }
                 )
