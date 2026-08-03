@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pi_ai import Model
-
 from pi_coding_agent import is_valid_thinking_level
 
 DEFAULT_THINKING_LEVEL = "medium"
@@ -300,8 +299,7 @@ def resolve_model_scope_with_diagnostics(
             matching_models = [
                 m
                 for m in available_models
-                if fnmatch.fnmatch(f"{m.provider}/{m.id}", glob_pattern)
-                or fnmatch.fnmatch(m.id, glob_pattern)
+                if fnmatch.fnmatch(f"{m.provider}/{m.id}", glob_pattern) or fnmatch.fnmatch(m.id, glob_pattern)
             ]
 
             if not matching_models:
@@ -460,11 +458,7 @@ def resolve_cli_model(
     if not provider:
         lower = cli_model.lower()
         exact = next(
-            (
-                m
-                for m in available_models
-                if m.id.lower() == lower or f"{m.provider}/{m.id}".lower() == lower
-            ),
+            (m for m in available_models if m.id.lower() == lower or f"{m.provider}/{m.id}".lower() == lower),
             None,
         )
         if exact:
@@ -506,11 +500,7 @@ def resolve_cli_model(
     if inferred_provider:
         lower = cli_model.lower()
         exact = next(
-            (
-                m
-                for m in available_models
-                if m.id.lower() == lower or f"{m.provider}/{m.id}".lower() == lower
-            ),
+            (m for m in available_models if m.id.lower() == lower or f"{m.provider}/{m.id}".lower() == lower),
             None,
         )
         if exact:
@@ -594,7 +584,6 @@ def find_initial_model(
     3. Saved default from settings
     4. First available model with valid API key
     """
-    thinking_level = DEFAULT_THINKING_LEVEL
 
     # 1. CLI args take priority
     if cli_provider and cli_model:
@@ -626,7 +615,9 @@ def find_initial_model(
         if found and model_runtime.has_configured_auth(found.provider):
             return InitialModelResult(
                 model=found,
-                thinking_level=default_thinking_level or DEFAULT_THINKING_LEVEL if default_thinking_level else DEFAULT_THINKING_LEVEL,
+                thinking_level=default_thinking_level or DEFAULT_THINKING_LEVEL
+                if default_thinking_level
+                else DEFAULT_THINKING_LEVEL,
                 fallback_message=None,
             )
 
@@ -640,7 +631,9 @@ def find_initial_model(
                 return InitialModelResult(model=match, thinking_level=DEFAULT_THINKING_LEVEL, fallback_message=None)
 
         # If no default found, use first available
-        return InitialModelResult(model=available_models[0], thinking_level=DEFAULT_THINKING_LEVEL, fallback_message=None)
+        return InitialModelResult(
+            model=available_models[0], thinking_level=DEFAULT_THINKING_LEVEL, fallback_message=None
+        )
 
     # 5. No model found
     return InitialModelResult(model=None, thinking_level=DEFAULT_THINKING_LEVEL, fallback_message=None)

@@ -465,7 +465,9 @@ def create_bash_tool(
     ) -> AgentToolResult:
         if not isinstance(args, dict):
             return error_result("bash tool requires arguments object")
-        command = args.get("command", "")
+        command = args.get("command")
+        if not command or not isinstance(command, str):
+            return error_result("bash tool requires a 'command' string argument")
         user_timeout = args.get("timeout")
         if user_timeout is not None:
             _validate_timeout(user_timeout)
