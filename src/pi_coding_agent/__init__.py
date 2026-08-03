@@ -306,13 +306,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"Error: {d['message']}", file=sys.stderr)
 
     if args.print or args.mode in ("json", "rpc"):
-        # Print mode: run prompt and print output
-        prompt = " ".join(args.messages) if args.messages else ""
-        if not prompt:
-            print("Error: No prompt provided for print mode", file=sys.stderr)
-            return 1
-        print(f"[pi] Prompt: {prompt}")
-        return 0
+        # Print mode: run prompt via the agent loop
+        from pi_coding_agent.print_mode import run_print_mode_sync
+
+        return run_print_mode_sync(args)
 
     # Interactive mode would start the TUI here
     print(f"{APP_NAME} - Interactive mode not yet implemented in Python port")
