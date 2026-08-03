@@ -876,7 +876,7 @@ class Session:
                 return id
         return _uuid_v7()
 
-    async def _enqueue_append[T](self, create_entry: Callable[[dict[str, Any]], T]) -> T:
+    async def _enqueue_append(self, create_entry: Callable[[dict[str, Any]], Any]) -> Any:
         """Enqueue an append operation, serialized via append_tail."""
         # Wait for previous append
         if not self._append_tail.done():
@@ -1218,7 +1218,8 @@ class InMemoryRepository:
 def _encode_cwd(cwd: str) -> str:
     """Encode a cwd path for use in a directory name."""
     stripped = re.sub(r"^[/\\]", "", cwd)
-    return f"--{re.sub(r'[/\\:]', '-', stripped)}--"
+    safe = re.sub(r"[/\\:]", "-", stripped)
+    return f"--{safe}--"
 
 
 def _parse_header(line: str, path: str) -> dict[str, Any]:
