@@ -1,0 +1,67 @@
+[project]
+name = "python-pi"
+version = "0.83.0"
+description = "Python port of the Pi agent harness"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic==2.12.5",
+    "typer==0.20.0",
+    "rich==14.2.0",
+    "textual==6.8.0",
+    "httpx==0.28.1",
+    "pyyaml==6.0.3",
+    "pathspec==0.12.1",
+    "filelock==3.20.0",
+    "packaging==25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "ruff==0.14.8",
+    "mypy==1.19.0",
+    "pip-audit==2.10.0",
+]
+
+[project.scripts]
+pi = "pi_coding_agent.cli:main"
+
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/pi_ai",
+    "src/pi_agent_core",
+    "src/pi_tui",
+    "src/pi_coding_agent",
+    "src/pi_protocol",
+    "src/pi_client",
+    "src/pi_server",
+    "src/pi_storage_sqlite",
+    "src/pi_evals",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = [
+    "pi_protocol",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
