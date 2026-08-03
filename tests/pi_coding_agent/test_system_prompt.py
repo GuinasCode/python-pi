@@ -1,0 +1,81 @@
+"""Tests for system prompt construction."""
+
+from __future__ import annotations
+
+from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system_prompt
+
+
+def test_default_prompt() -> None:
+    opts = BuildSystemPromptOptions(cwd="/home/user/project")
+    prompt = build_system_prompt(opts)
+    assert "coding assistant" in prompt
+    assert "Available tools:" in prompt
+    assert "Guidelines:" in prompt
+    assert "/home/user/project" in prompt
+
+
+def test_custom_prompt() -> None:
+    opts = BuildSystemPromptOptions(
+        custom_prompt="You are a code reviewer.",
+        cwd="/tmp",
+    )
+    prompt = build_system_prompt(opts)
+    assert "You are a code reviewer." in prompt
+    assert "/tmp" in prompt
+
+
+def test_append_system_prompt() -> None:
+    opts = BuildSystemPromptOptions(
+        cwd="/tmp",
+        append_system_prompt="Always use type hints.",
+    )
+    prompt = build_system_prompt(opts)
+    assert "Always use type hints." in prompt
+
+
+def test_context_files() -> None:
+    opts = BuildSystemPromptOptions(
+        cwd="/tmp",
+        context_files=[
+            {"path": "AGENTS.md", "content": "Follow PEP 8."},
+        ],
+    )
+    prompt = build_system_prompt(opts)
+    assert "AGENTS.md" in prompt
+    assert "Follow PEP 8." in prompt
+    assert "project_context" in prompt
+
+
+def test_selected_tools() -> None:
+    opts = BuildSystemPromptOptions(
+        cwd="/tmp",
+        selected_tools=["read", "bash"],
+        tool_snippets={"read": "Read file contents", "bash": "Execute command"},
+    )
+    prompt = build_system_prompt(opts)
+    assert "read: Read file contents" in prompt
+    assert "bash: Execute command" in prompt
+
+
+def test_prompt_guidelines() -> None:
+    opts = BuildSystemPromptOptions(
+        cwd="/tmp",
+        prompt_guidelines=["Never use global variables"],
+    )
+    prompt = build_system_prompt(opts)
+    assert "Never use global variables" in prompt
+
+
+def test_windows_path_normalized() -> None:
+    opts = BuildSystemPromptOptions(cwd="C:\\Users\\test\\project")
+    prompt = build_system_prompt(opts)
+    assert "C:/Users/test/project" in prompt
+
+
+def test_no_tools() -> None:
+    opts = BuildSystemPromptOptions(
+        cwd="/tmp",
+        selected_tools=[],
+    )
+    prompt = build_system_prompt(opts)
+    assert "(none)" in prompt
