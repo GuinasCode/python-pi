@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from pi_ai import AssistantMessage, Message, StopReason, UserMessage
+from pi_ai import AssistantMessage, Message, Model, StopReason, UserMessage
 from pi_ai.models import MutableModels, Provider
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
@@ -26,8 +26,28 @@ from pi_coding_agent.session_manager import SessionEntry, SessionManager
 
 
 def _setup_models(args: Args) -> tuple[MutableModels, Any]:
-    """Set up models with available providers."""
+    """Set up models with available providers.
+
+    Priority order:
+    1. NVAPI_KEY -> NVIDIA Moonshot (Kimi K2.6)
+    2. OPENAI_API_KEY -> OpenAI
+    3. Faux provider (fallback for testing)
+    """
     models = MutableModels()
+
+    # Try NVIDIA GLM 5.2 first if NVAPI_KEY is available
+    nvapi_key = args.api_key or os.environ.get("NVAPI_KEY")
+    if nvapi_key:
+        try:
+            from pi_ai.providers.nvidia_glm import nvidia_glm_provider
+
+            model, provider_models, _meta = nvidia_glm_provider(
+                Model(id="test"),
+                api_key=nvapi_key,
+            )
+            return provider_models, model
+        except Exception as e:
+            print(f"[warning] NVIDIA provider failed: {e}", file=sys.stderr)
 
     # Try OpenAI if API key is available
     openai_key = args.api_key or os.environ.get("OPENAI_API_KEY")
@@ -58,7 +78,7 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
                 last_user = message.content if isinstance(message.content, str) else str(message.content)
                 break
         return faux_assistant_message(
-            "(faux provider: set OPENAI_API_KEY for real LLM responses)\n"
+            "(faux provider: set NVAPI_KEY or OPENAI_API_KEY for real LLM responses)\n"
             f"I received your message and kept it in context: {last_user}"
         )
 

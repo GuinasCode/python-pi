@@ -13,7 +13,7 @@ import sys
 import time
 from typing import Any
 
-from pi_ai import Context, UserMessage
+from pi_ai import Context, Model, UserMessage
 from pi_ai.models import MutableModels
 from pi_coding_agent import Args
 
@@ -36,6 +36,20 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
     from pi_ai.providers.faux import faux_assistant_message, faux_provider
 
     models = MutableModels()
+
+    # Try NVIDIA GLM 5.2 first if NVAPI_KEY is available
+    nvapi_key = args.api_key or os.environ.get("NVAPI_KEY")
+    if nvapi_key:
+        try:
+            from pi_ai.providers.nvidia_glm import nvidia_glm_provider
+
+            model, provider_models, _meta = nvidia_glm_provider(
+                Model(id="test"),
+                api_key=nvapi_key,
+            )
+            return provider_models, model
+        except Exception:
+            pass
 
     # Try OpenAI if API key is available
     openai_key = args.api_key or os.environ.get("OPENAI_API_KEY")
