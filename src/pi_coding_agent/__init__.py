@@ -311,9 +311,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return run_print_mode_sync(args)
 
-    # Interactive mode would start the TUI here
-    print(f"{APP_NAME} - Interactive mode not yet implemented in Python port")
-    return 0
+    # Interactive mode
+    from pi_coding_agent.interactive_mode import run_interactive_sync
+
+    return run_interactive_sync(args)
 
 
 if __name__ == "__main__":

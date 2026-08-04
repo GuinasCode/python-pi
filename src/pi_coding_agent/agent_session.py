@@ -239,6 +239,7 @@ class AgentSession:
         self._messages.append(user_msg)
 
         for _turn in range(self._max_turns):
+            self._compact_context_if_needed()
             context = Context(
                 system_prompt=system_prompt,
                 messages=self._messages,
@@ -286,6 +287,20 @@ class AgentSession:
             stop_reason=StopReason.LENGTH,
             timestamp=int(time.time() * 1000),
         )
+
+    def _compact_context_if_needed(self, max_messages: int = 40) -> None:
+        """Basic compaction: keep the first system-relevant turn and most recent messages.
+
+        The original TypeScript implementation uses an LLM summarizer. This
+        lightweight Python version prevents unbounded context growth while keeping
+        recent conversational state intact.
+        """
+        if len(self._messages) <= max_messages:
+            return
+        kept = self._messages[-max_messages:]
+        summary_text = f"[Context compacted: {len(self._messages) - len(kept)} older messages omitted]"
+        summary = UserMessage(content=summary_text, timestamp=int(time.time() * 1000))
+        self._messages = [summary, *kept]
 
     async def _consume_stream(self, stream: Any) -> AssistantMessage | None:
         """Consume an event stream and return the final AssistantMessage."""
