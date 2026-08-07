@@ -5,6 +5,7 @@ Mirrors packages/coding-agent/src/core/tools/.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import subprocess
@@ -206,9 +207,17 @@ def edit_file(
 
     try:
         file_path.write_text(new_content, encoding="utf-8")
+        diff = list(
+            difflib.unified_diff(
+                content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=str(path),
+                tofile=str(path),
+            )
+        )
         return ToolResult(
             content=[_text_content(f"File edited: {path} ({count} replacement(s))")],
-            details={"path": str(file_path), "replacements": count},
+            details={"path": str(file_path), "replacements": count, "diff": diff},
         )
     except Exception as exc:
         return ToolResult(

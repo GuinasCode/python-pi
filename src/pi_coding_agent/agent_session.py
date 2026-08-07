@@ -43,6 +43,7 @@ class _ToolCallEndEvent:
     name: str = ""
     is_error: bool = False
     result_text: str = ""
+    details: Any = None
 
 
 @dataclass
@@ -315,13 +316,18 @@ class AgentSession:
                     continue
                 tool_call = block
                 self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
-                result, is_error = await self._execute_tool_call(tool_call)
+                result, is_error, details = await self._execute_tool_call(tool_call)
                 result_text = result[0].get("text", "") if result else ""
-                self._emit(_ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text))
+                self._emit(
+                    _ToolCallEndEvent(
+                        name=tool_call.name, is_error=is_error, result_text=result_text, details=details
+                    )
+                )
                 tool_result_msg = ToolResultMessage(
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
                     content=[TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"],
+                    details=details,
                     is_error=is_error,
                     timestamp=int(time.time() * 1000),
                 )
@@ -339,8 +345,8 @@ class AgentSession:
     async def _execute_tool_call(
         self,
         tool_call: ToolCall,
-    ) -> tuple[list[dict[str, str]], bool]:
-        """Execute a tool call, returning (content_dicts, is_error).
+    ) -> tuple[list[dict[str, str]], bool, Any]:
+        """Execute a tool call, returning (content_dicts, is_error, details).
 
         If the tool is an :class:`AgentTool` with an async ``execute``
         callback, that is called directly.  Otherwise the call is dispatched
@@ -359,13 +365,13 @@ class AgentSession:
                         for b in agent_result.content
                         if hasattr(b, "text")
                     ]
-                    return content or [{"type": "text", "text": ""}], False
+                    return content or [{"type": "text", "text": ""}], False, None
                 except Exception as exc:
-                    return [{"type": "text", "text": str(exc)}], True
+                    return [{"type": "text", "text": str(exc)}], True, None
 
         # Built-in synchronous tools
         sync_result = _execute_tool(tool_call.name, tool_call.arguments)
-        return sync_result.content, sync_result.is_error
+        return sync_result.content, sync_result.is_error, sync_result.details
 
     def _compact_context_if_needed(self, max_messages: int = 40) -> None:
         """Basic compaction: keep the first system-relevant turn and most recent messages.
