@@ -24,8 +24,11 @@ from pi_ai.models import MutableModels, Provider
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
 from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_config_dir, get_session_dir
+from pi_coding_agent.diff_render import render_diff
+from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
+from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW
 
 _console = Console(highlight=False, soft_wrap=True)
 _err_console = Console(highlight=False, soft_wrap=True, stderr=True)
@@ -268,6 +271,12 @@ class InteractiveSession:
             data["tool_call_id"] = message.tool_call_id
             data["tool_name"] = message.tool_name
             data["is_error"] = message.is_error
+            data["content"] = [
+                {"type": b.type, "text": b.text} if hasattr(b, "text") else {"type": b.type}
+                for b in message.content
+            ]
+            if message.details is not None:
+                data["details"] = message.details
 
         entry = SessionEntry(
             seq=self._message_count,
@@ -284,15 +293,13 @@ class InteractiveSession:
     # ------------------------------------------------------------------
 
     def _flush_text_block(self) -> None:
-        """Render the accumulated text block as Markdown (left-aligned) and reset."""
-        from rich.markdown import Markdown
-
+        """Render the accumulated text block as left-aligned Markdown and reset."""
         buf = self._text_block_buf
         self._text_block_buf = ""
         if not buf:
             return
         if buf.strip():
-            _console.print(Markdown(buf, justify="left"))
+            _console.print(Markdown(buf))
         else:
             _console.print(buf)
 
@@ -303,15 +310,15 @@ class InteractiveSession:
         # ── thinking ──────────────────────────────────────────────────
         if t == "thinking_start":
             self._thinking_open = True
-            _console.print("[dim italic]<thinking>[/dim italic]")
+            _console.print(f"[{DIM_STYLE} italic]thinking[/{DIM_STYLE} italic]")
 
         elif t == "thinking_delta":
             delta = getattr(event, "delta", "")
-            _console.print(f"[dim italic]{escape(delta)}[/dim italic]", end="")
+            _console.print(f"[{DIM_STYLE} italic]{escape(delta)}[/{DIM_STYLE} italic]", end="")
 
         elif t == "thinking_end":
             self._thinking_open = False
-            _console.print("\n[dim italic]</thinking>[/dim italic]")
+            _console.print()
 
         # ── text streaming: buffer and render as Markdown on text_end ─
         elif t == "text_start":
@@ -330,7 +337,7 @@ class InteractiveSession:
             if tool_call:
                 args_str = _fmt_args(getattr(tool_call, "arguments", {}))
                 _console.print(
-                    f"\n[bold cyan]> {escape(tool_call.name)}[/bold cyan]({args_str})"
+                    f"\n[bold {PASTEL_BLUE}]> {escape(tool_call.name)}[/bold {PASTEL_BLUE}]({args_str})"
                 )
 
         # ── tool execution (AgentSession) ─────────────────────────────
@@ -339,18 +346,24 @@ class InteractiveSession:
             args = getattr(event, "args", {}) or {}
             args_str = _fmt_args(args)
             self._status = f"running: {name}"
-            _console.print(f"[yellow]~[/yellow] [bold]{escape(name)}[/bold]({args_str})")
+            _console.print(f"[{PASTEL_YELLOW}]~[/{PASTEL_YELLOW}] [bold]{escape(name)}[/bold]({args_str})")
 
         elif t == "tool_call_end":
             name = getattr(event, "name", "")
             is_error = getattr(event, "is_error", False)
             result_text = getattr(event, "result_text", "")
+            details = getattr(event, "details", None)
             self._status = "thinking..."
-            icon = "[red]![/red]" if is_error else "[green]+[/green]"
-            _console.print(f"{icon} [bold]{escape(name)}[/bold]")
-            preview = _fmt_result_preview(result_text)
-            if preview:
-                _console.print(preview)
+            icon_style = PASTEL_RED if is_error else PASTEL_GREEN
+            icon = "!" if is_error else "+"
+            _console.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
+            diff = (details or {}).get("diff") if isinstance(details, dict) else None
+            if diff:
+                _console.print(render_diff(diff))
+            else:
+                preview = _fmt_result_preview(result_text)
+                if preview:
+                    _console.print(preview)
 
         # ── done: flush any remaining text (stream ended without text_end)
         elif t == "done":
@@ -363,7 +376,7 @@ class InteractiveSession:
             self._status = "ready"
             err = getattr(event, "error", None)
             msg = getattr(err, "error_message", None) or str(err)
-            _console.print(f"[red]error:[/red] {escape(msg)}")
+            _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
         """Run a single conversation turn."""
@@ -376,7 +389,7 @@ class InteractiveSession:
         try:
             result = await self._agent_session.prompt(user_input)
         except Exception as exc:
-            _console.print(f"\n[red]error:[/red] {escape(str(exc))}")
+            _console.print(f"\n[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(str(exc))}")
             return None
         finally:
             unsub()
@@ -402,9 +415,9 @@ class InteractiveSession:
         """Draw the bordered input area, return stripped text or None on exit."""
         w = _console.width
 
-        # Tips — right-aligned, one line above the top border
+        # Tips — left-aligned, one line above the top border
         tips = "/help  /clear  /model  /session  /exit"
-        _console.print(f"[dim]{tips}[/dim]", justify="right")
+        _console.print(f"[{DIM_STYLE}]{tips}[/{DIM_STYLE}]")
 
         # Top rule — plain horizontal line spanning the terminal width
         sys.stdout.write("─" * w + "\n")
@@ -455,13 +468,12 @@ class InteractiveSession:
         model_name = getattr(self._model, "name", "unknown")
         model_id = getattr(self._model, "id", "?")
 
-        # One-line banner — right-aligned
+        # One-line banner — left-aligned
         _console.print(
             f"[bold]pi[/bold] v0.83.0  [dim]·[/dim]"
-            f"  [cyan]{provider_name}[/cyan] / [cyan]{model_name}[/cyan]"
+            f"  [{PASTEL_BLUE}]{provider_name}[/{PASTEL_BLUE}] / [{PASTEL_BLUE}]{model_name}[/{PASTEL_BLUE}]"
             f"  [dim]({model_id})[/dim]"
-            f"  [dim]{self._cwd}[/dim]",
-            justify="right",
+            f"  [dim]{self._cwd}[/dim]"
         )
         _console.print()
 
@@ -487,7 +499,7 @@ class InteractiveSession:
 
             if result and result.stop_reason == StopReason.ERROR:
                 error_msg = result.error_message or "Unknown error"
-                _console.print(f"[red]error:[/red] {escape(error_msg)}")
+                _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(error_msg)}")
 
     def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
@@ -499,19 +511,19 @@ class InteractiveSession:
         if cmd == "/help":
             _console.print(
                 "\n[bold]Commands[/bold]\n"
-                "  [cyan]/help[/cyan]     Show this help\n"
-                "  [cyan]/exit[/cyan]     Exit Pi\n"
-                "  [cyan]/model[/cyan]    Show current model\n"
-                "  [cyan]/clear[/cyan]    Clear conversation history\n"
-                "  [cyan]/tools[/cyan]    List available tools\n"
-                "  [cyan]/session[/cyan]  Show session info\n"
+                f"  [{PASTEL_BLUE}]/help[/{PASTEL_BLUE}]     Show this help\n"
+                f"  [{PASTEL_BLUE}]/exit[/{PASTEL_BLUE}]     Exit Pi\n"
+                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Show current model\n"
+                f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
+                f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
+                f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
             )
             return True
 
         if cmd == "/model":
             _console.print(
-                f"Provider: [cyan]{getattr(self._model, 'provider', '?')}[/cyan]\n"
-                f"Model:    [cyan]{getattr(self._model, 'id', '?')}[/cyan]\n"
+                f"Provider: [{PASTEL_BLUE}]{getattr(self._model, 'provider', '?')}[/{PASTEL_BLUE}]\n"
+                f"Model:    [{PASTEL_BLUE}]{getattr(self._model, 'id', '?')}[/{PASTEL_BLUE}]\n"
                 f"Context:  {getattr(self._model, 'context_window', '?')} tokens"
             )
             return True
@@ -523,7 +535,7 @@ class InteractiveSession:
 
         if cmd == "/tools":
             for tool in self._agent_session._tools:
-                _console.print(f"  [cyan]{tool.name}[/cyan]: {tool.description}")
+                _console.print(f"  [{PASTEL_BLUE}]{tool.name}[/{PASTEL_BLUE}]: {tool.description}")
             return True
 
         if cmd == "/session":
@@ -554,7 +566,7 @@ async def run_interactive_mode(args: Args) -> int:
 
     models, model = _setup_models_with_settings(args)
     if model is None:
-        _console.print("[red]error:[/red] No model available")
+        _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] No model available")
         return 1
 
     session_mgr = SessionManager(session_dir)
