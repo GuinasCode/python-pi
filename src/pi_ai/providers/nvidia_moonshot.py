@@ -30,16 +30,13 @@ from pi_ai import (
     Model,
     StartEvent,
     StopReason,
-    TextContent,
     TextDeltaEvent,
     TextEndEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
-    UserMessage,
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
-
 
 NIGHTLY_API = "openai"  # Uses OpenAI-compatible API format
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -98,16 +95,6 @@ async def _stream_kimi(
     state: dict[str, int],
 ) -> None:
     """Stream from Kimi K2.6 via NVIDIA Inference API."""
-    from pi_ai import (
-        DoneEvent,
-        ErrorEvent,
-        StartEvent,
-        TextDeltaEvent,
-        TextEndEvent,
-        TextStartEvent,
-        ToolCallEndEvent,
-        ToolCallStartEvent,
-    )
 
     if httpx is None:
         stream = create_assistant_message_event_stream()
@@ -123,7 +110,6 @@ async def _stream_kimi(
     }
 
     # Convert messages
-    from pi_ai import Message
 
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
@@ -142,15 +128,15 @@ async def _stream_kimi(
     if context.system_prompt:
         messages.insert(0, {"role": "system", "content": context.system_prompt})
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": model_id,
         "messages": messages,
-        "max_tokens": options.max_tokens if options else MAX_TOKENS,
-        "temperature": 1.0,
-        "top_p": 1.0,
+        "max_tokens": options.max_tokens if options and options.max_tokens is not None else MAX_TOKENS,
         "seed": 0,
         "stream": True,
     }
+    if options and options.temperature is not None:
+        payload["temperature"] = options.temperature
 
     # Add tools if present
     if context.tools:
@@ -167,43 +153,42 @@ async def _stream_kimi(
         payload["tools"] = tools_list
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                DEFAULT_BASE_URL,
-                headers=headers,
-                json=payload,
-            ) as response:
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    stream.push(
-                        ErrorEvent(reason="error", error=f"NVIDIA API error {response.status_code}: {error_text.decode()}")
-                    )
-                    stream.end(f"NVIDIA API error {response.status_code}")
-                    return
+        async with httpx.AsyncClient(timeout=120.0) as client, client.stream(
+            "POST",
+            DEFAULT_BASE_URL,
+            headers=headers,
+            json=payload,
+        ) as response:
+            if response.status_code != 200:
+                error_text = await response.aread()
+                stream.push(
+                    ErrorEvent(reason="error", error=f"NVIDIA API error {response.status_code}: {error_text.decode()}")
+                )
+                stream.end(f"NVIDIA API error {response.status_code}")
+                return
 
-                stream.push(StartEvent(partial=AssistantMessage(stop_reason=StopReason.PENDING)))
+            stream.push(StartEvent(partial=AssistantMessage(stop_reason=StopReason.PENDING)))
 
-                text_buffer = ""
-                tool_calls: dict[str, dict[str, Any]] = {}
+            text_buffer = ""
+            tool_calls: dict[str, dict[str, Any]] = {}
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
 
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
 
-                    await _process_kimi_chunk(chunk, stream, text_buffer, tool_calls)
-                    text_buffer = await _get_and_reset_text_buffer(stream)
-                    tool_calls = await _get_and_reset_tool_calls(stream)
+                await _process_kimi_chunk(chunk, stream, text_buffer, tool_calls)
+                text_buffer = await _get_and_reset_text_buffer(stream)
+                tool_calls = await _get_and_reset_tool_calls(stream)
 
-                stream.end("DONE")
+            stream.end("DONE")
     except Exception as exc:
         stream.push(ErrorEvent(reason="error", error=str(exc)))
         stream.end(str(exc))
@@ -218,10 +203,10 @@ async def _process_kimi_chunk(
     """Process a single chunk from Kimi K2.6 response."""
     delta = chunk.get("choices", [{}])[0].get("delta", {})
 
-    if "content" in delta and delta["content"]:
+    if delta.get("content"):
         stream.push(TextDeltaEvent(delta=delta["content"]))
 
-    if "tool_calls" in delta and delta["tool_calls"]:
+    if delta.get("tool_calls"):
         for tc in delta["tool_calls"]:
             stream.push(ToolCallStartEvent(name=tc.get("function", {}).get("name", "")))
             stream.push(ToolCallEndEvent(name=tc.get("function", {}).get("name", "")))

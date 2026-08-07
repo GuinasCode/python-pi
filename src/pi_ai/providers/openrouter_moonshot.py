@@ -28,16 +28,11 @@ from pi_ai import (
     Model,
     StartEvent,
     StopReason,
-    TextContent,
     TextDeltaEvent,
     TextEndEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
-    UserMessage,
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
-
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_TOKENS = 16384
@@ -94,15 +89,6 @@ async def _stream_kimi(
     state: dict[str, int],
 ) -> None:
     """Stream from Kimi K2.6 via OpenRouter."""
-    from pi_ai import (
-        DoneEvent,
-        ErrorEvent,
-        StartEvent,
-        TextDeltaEvent,
-        TextEndEvent,
-        ToolCallEndEvent,
-        ToolCallStartEvent,
-    )
 
     if httpx is None:
         stream = create_assistant_message_event_stream()
@@ -136,14 +122,14 @@ async def _stream_kimi(
     if context.system_prompt:
         messages.insert(0, {"role": "system", "content": context.system_prompt})
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": "moonshotai/kimi-k2.6",
         "messages": messages,
-        "max_tokens": options.max_tokens if options else MAX_TOKENS,
-        "temperature": 1.0,
-        "top_p": 1.0,
+        "max_tokens": options.max_tokens if options and options.max_tokens is not None else MAX_TOKENS,
         "stream": True,
     }
+    if options and options.temperature is not None:
+        payload["temperature"] = options.temperature
 
     # Add tools if present
     if context.tools:
@@ -160,45 +146,45 @@ async def _stream_kimi(
         payload["tools"] = tools_list
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
+        async with (
+            httpx.AsyncClient(timeout=120.0) as client,
+            client.stream(
                 "POST",
                 DEFAULT_BASE_URL,
                 headers=headers,
                 json=payload,
-            ) as response:
-                if response.status_code != 200:
-                    error_text = await response.aread()
-                    stream.push(
-                        ErrorEvent(reason="error", error=f"OpenRouter API error {response.status_code}: {error_text.decode()}")
-                    )
-                    stream.end(f"OpenRouter API error {response.status_code}")
-                    return
+            ) as response,
+        ):
+            if response.status_code != 200:
+                error_text = await response.aread()
+                stream.push(
+                    ErrorEvent(reason="error", error=f"OpenRouter API error {response.status_code}: {error_text.decode()}")
+                )
+                stream.end(f"OpenRouter API error {response.status_code}")
+                return
 
-                stream.push(StartEvent(partial=AssistantMessage(stop_reason=StopReason.PENDING)))
+            stream.push(StartEvent(partial=AssistantMessage(stop_reason=StopReason.PENDING)))
 
-                text_buffer = ""
+            async for line in response.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
 
-                async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
 
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
+                if "choices" in chunk and len(chunk["choices"]) > 0:
+                    delta = chunk["choices"][0].get("delta", {})
+                    if delta.get("content"):
+                        stream.push(TextDeltaEvent(delta=delta["content"]))
 
-                    if "choices" in chunk and len(chunk["choices"]) > 0:
-                        delta = chunk["choices"][0].get("delta", {})
-                        if "content" in delta and delta["content"]:
-                            stream.push(TextDeltaEvent(delta=delta["content"]))
-                        
-                        if chunk["choices"][0].get("finish_reason"):
-                            stream.push(TextEndEvent(content=delta.get("content", "")))
-                            stream.push(DoneEvent(reason=chunk["choices"][0]["finish_reason"]))
+                    if chunk["choices"][0].get("finish_reason"):
+                        stream.push(TextEndEvent(content=delta.get("content", "")))
+                        stream.push(DoneEvent(reason=chunk["choices"][0]["finish_reason"]))
 
     except Exception as exc:
         stream.push(ErrorEvent(reason="error", error=str(exc)))

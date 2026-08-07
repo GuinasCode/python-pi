@@ -34,6 +34,7 @@ class SQLiteSessionRepository:
         self._db_path = str(db_path)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._init_schema()
 
     def _init_schema(self) -> None:

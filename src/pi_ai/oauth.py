@@ -12,6 +12,7 @@ This mirrors the OAuth provider pattern in the TypeScript Pi agent.
 from __future__ import annotations
 
 import secrets
+import sys
 import time
 from typing import Any
 
@@ -97,13 +98,13 @@ class OpenAICodexAuthInteraction:
 
     def open_url(self, url: str) -> None:
         """Print the URL for the user to visit in their browser."""
-        print("\n[OpenAI OAuth Login Required]", file=__import__("sys").stderr)
-        print(f"Please visit: {url}", file=__import__("sys").stderr)
-        print("Enter the authorization code here: ", end="", flush=True, file=__import__("sys").stderr)
+        print("\n[OpenAI OAuth Login Required]", file=sys.stderr)
+        print(f"Please visit: {url}", file=sys.stderr)
+        print("Enter the authorization code here: ", end="", flush=True, file=sys.stderr)
 
     def display_code(self, code: str) -> None:
         """Display a code to the user (alternative to URL)."""
-        print(f"\n[OpenAI OAuth Code: {code}]", file=__import__("sys").stderr)
+        print(f"\n[OpenAI OAuth Code: {code}]", file=sys.stderr)
 
 
 class OpenAICodexAuthProvider:
@@ -143,10 +144,15 @@ class OpenAICodexAuthProvider:
             auth_interaction._auth.build_auth_url(auth_interaction.redirect_uri)
         )
 
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "OpenAI OAuth login requires an interactive terminal to enter the "
+                "authorization code; none is attached to stdin."
+            )
         code = input().strip()
 
-        verif = auth_interaction._auth._code_verifier[:8]
-        cred = auth_interaction._auth.exchange_code(code, verif, auth_interaction.redirect_uri)
+        verifier = auth_interaction._auth._code_verifier
+        cred = auth_interaction._auth.exchange_code(code, verifier, auth_interaction.redirect_uri)
         if cred:
             self._credential = cred
         return cred
