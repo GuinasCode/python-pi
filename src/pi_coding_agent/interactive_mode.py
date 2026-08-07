@@ -16,6 +16,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+from rich.markup import escape
+
 from pi_ai import AssistantMessage, Message, Model, StopReason, UserMessage
 from pi_ai.models import MutableModels, Provider
 from pi_coding_agent import Args
@@ -24,18 +27,59 @@ from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_co
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
 
+_console = Console(highlight=False, soft_wrap=True)
+_err_console = Console(highlight=False, soft_wrap=True, stderr=True)
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_args(args: Any) -> str:
+    """Format tool arguments into a concise single-line representation."""
+    if not args:
+        return ""
+    if isinstance(args, dict):
+        parts: list[str] = []
+        for k, v in args.items():
+            if v is None:
+                continue
+            if isinstance(v, str):
+                # Truncate long strings
+                display = v if len(v) <= 60 else v[:57] + "..."
+                parts.append(f'{k}="{escape(display)}"')
+            else:
+                parts.append(f"{k}={escape(str(v))}")
+        return ", ".join(parts)
+    return escape(str(args))
+
+
+def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
+    """Return a dim-styled preview of tool output."""
+    if not text or not text.strip():
+        return ""
+    lines = text.rstrip().splitlines()
+    shown = lines[:max_lines]
+    preview_lines = [f"  [dim]{escape(line)}[/dim]" for line in shown]
+    if len(lines) > max_lines:
+        preview_lines.append(f"  [dim]... ({len(lines) - max_lines} more lines)[/dim]")
+    return "\n".join(preview_lines)
+
+
+# ---------------------------------------------------------------------------
+# Model setup
+# ---------------------------------------------------------------------------
 
 def _setup_models(args: Args) -> tuple[MutableModels, Any]:
     """Set up models with available providers.
 
     Priority order:
-    1. NVAPI_KEY -> NVIDIA Moonshot (Kimi K2.6)
+    1. NVAPI_KEY  -> NVIDIA GLM 5.2
     2. OPENAI_API_KEY -> OpenAI
     3. Faux provider (fallback for testing)
     """
     models = MutableModels()
 
-    # Try NVIDIA GLM 5.2 first if NVAPI_KEY is available
     nvapi_key = args.api_key or os.environ.get("NVAPI_KEY")
     if nvapi_key:
         try:
@@ -47,9 +91,8 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
             )
             return provider_models, model
         except Exception as e:
-            print(f"[warning] NVIDIA provider failed: {e}", file=sys.stderr)
+            _err_console.print(f"[yellow]warning:[/yellow] NVIDIA provider failed: {e}")
 
-    # Try OpenAI if API key is available
     openai_key = args.api_key or os.environ.get("OPENAI_API_KEY")
     if openai_key:
         try:
@@ -67,8 +110,6 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
         except Exception:
             pass
 
-    # Fall back to faux provider. Queue many context-aware responses so the
-    # interactive REPL can run multiple turns without a real API key.
     from pi_ai.providers.faux import faux_assistant_message, faux_provider
 
     def faux_reply(context: Any, _options: Any, _state: dict[str, int], _model: Any) -> AssistantMessage:
@@ -79,7 +120,7 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
                 break
         return faux_assistant_message(
             "(faux provider: set NVAPI_KEY or OPENAI_API_KEY for real LLM responses)\n"
-            f"I received your message and kept it in context: {last_user}"
+            f"I received your message: {last_user}"
         )
 
     handle = faux_provider()
@@ -94,14 +135,12 @@ def _setup_models_with_settings(args: Args) -> tuple[MutableModels, Any]:
         from pi_coding_agent.settings_manager import SettingsManager
 
         settings_mgr = SettingsManager.create(cwd=str(Path.cwd()), agent_dir=get_config_dir())
-        settings = settings_mgr.get_settings()
-        provider_name = settings.get("provider")
-        model_id = settings.get("model")
+        provider_name = settings_mgr.get_default_provider()
+        model_id = settings_mgr.get_default_model()
     except Exception:
         provider_name = None
         model_id = None
 
-    # Override with CLI args
     if args.provider:
         provider_name = args.provider
     if args.model:
@@ -109,7 +148,6 @@ def _setup_models_with_settings(args: Args) -> tuple[MutableModels, Any]:
 
     models, default_model = _setup_models(args)
 
-    # Try to find a specific model if specified
     if model_id and provider_name:
         found = models.get_model(provider_name, model_id)
         if found:
@@ -117,6 +155,10 @@ def _setup_models_with_settings(args: Args) -> tuple[MutableModels, Any]:
 
     return models, default_model
 
+
+# ---------------------------------------------------------------------------
+# Interactive session
+# ---------------------------------------------------------------------------
 
 class InteractiveSession:
     """Interactive REPL session that maintains context and persists to disk."""
@@ -136,10 +178,8 @@ class InteractiveSession:
         self._cwd = cwd
         self._config_dir = config_dir or get_config_dir()
 
-        # Load resources (AGENTS.md, SYSTEM.md, skills)
         resources = load_resources(cwd, self._config_dir)
 
-        # Create agent session
         self._agent_session = AgentSession(
             AgentSessionOptions(
                 models=models,
@@ -152,20 +192,21 @@ class InteractiveSession:
             )
         )
 
-        # Session persistence
         self._session_manager = session_manager
         self._session_id = session_id
         self._message_count = 0
-
-        # Restore persisted messages if this is a resumed session.
         self._restore_persisted_messages()
 
-        # State
         self._running = False
         self._event_handlers: list[Callable[[str], None]] = []
+        self._turn_has_text = False
+        self._thinking_open = False
+        # Buffer for the current text block — flushed as Markdown on text_end.
+        self._text_block_buf = ""
+        # Human-readable current status shown below the input box.
+        self._status = "ready"
 
     def _restore_persisted_messages(self) -> None:
-        """Load messages from the session JSONL file into the agent session."""
         if not self._session_manager or not self._session_id:
             return
         entries = self._session_manager.get_entries(self._session_id)
@@ -175,7 +216,7 @@ class InteractiveSession:
             data = entry.data
             role = data.get("role", "user")
             if role == "user":
-                msg = UserMessage(content=data.get("content", ""), timestamp=data.get("timestamp", 0))
+                msg: Message = UserMessage(content=data.get("content", ""), timestamp=data.get("timestamp", 0))
             elif role == "assistant":
                 from pi_ai import TextContent
 
@@ -190,29 +231,16 @@ class InteractiveSession:
                     timestamp=data.get("timestamp", 0),
                 )
             elif role == "toolResult":
-                # Skip tool results in the restored context for simplicity
                 continue
             else:
                 continue
             self._agent_session._messages.append(msg)
             self._message_count += 1
 
-    def _on_tool_call_start(self, name: str, args: dict) -> None:
-        """Print tool call start."""
-        args_str = " ".join(f"{k}={v!r}" for k, v in args.items() if v is not None)
-        print(f"\n[tool] {name}({args_str})", file=sys.stderr)
-
-    def _on_tool_call_end(self, name: str, is_error: bool) -> None:
-        """Print tool call end."""
-        status = "error" if is_error else "done"
-        print(f"[tool] {name} {status}", file=sys.stderr)
-
     def _persist_message(self, message: Message) -> None:
-        """Persist a message to the session JSONL file."""
         if not self._session_manager or not self._session_id:
             return
 
-        kind = "message"
         data: dict[str, Any] = {"role": message.role}
 
         if message.role == "user":
@@ -220,7 +248,9 @@ class InteractiveSession:
             if isinstance(content, str):
                 data["content"] = content
             elif isinstance(content, list):
-                data["content"] = [{"type": b.type, "text": b.text} if hasattr(b, "type") else str(b) for b in content]
+                data["content"] = [
+                    {"type": b.type, "text": b.text} if hasattr(b, "type") else str(b) for b in content
+                ]
         elif message.role == "assistant":
             data["content"] = [
                 {"type": b.type, "text": b.text}
@@ -242,94 +272,222 @@ class InteractiveSession:
         entry = SessionEntry(
             seq=self._message_count,
             parent_seq=self._message_count - 1 if self._message_count > 0 else None,
-            kind=kind,
+            kind="message",
             data=data,
             timestamp=int(time.time() * 1000),
         )
         self._session_manager.append_entry(self._session_id, entry)
         self._message_count += 1
 
+    # ------------------------------------------------------------------
+    # Rich event display
+    # ------------------------------------------------------------------
+
+    def _flush_text_block(self) -> None:
+        """Render the accumulated text block as Markdown (left-aligned) and reset."""
+        from rich.markdown import Markdown
+
+        buf = self._text_block_buf
+        self._text_block_buf = ""
+        if not buf:
+            return
+        if buf.strip():
+            _console.print(Markdown(buf, justify="left"))
+        else:
+            _console.print(buf)
+
+    def _handle_event(self, event: Any) -> None:
+        """Display agent events with rich formatting."""
+        t = getattr(event, "type", "")
+
+        # ── thinking ──────────────────────────────────────────────────
+        if t == "thinking_start":
+            self._thinking_open = True
+            _console.print("[dim italic]<thinking>[/dim italic]")
+
+        elif t == "thinking_delta":
+            delta = getattr(event, "delta", "")
+            _console.print(f"[dim italic]{escape(delta)}[/dim italic]", end="")
+
+        elif t == "thinking_end":
+            self._thinking_open = False
+            _console.print("\n[dim italic]</thinking>[/dim italic]")
+
+        # ── text streaming: buffer and render as Markdown on text_end ─
+        elif t == "text_start":
+            self._turn_has_text = True
+            self._text_block_buf = ""
+
+        elif t == "text_delta":
+            self._text_block_buf += getattr(event, "delta", "")
+
+        elif t == "text_end":
+            self._flush_text_block()
+
+        # ── model announcing a tool call ──────────────────────────────
+        elif t == "toolcall_end":
+            tool_call = getattr(event, "tool_call", None)
+            if tool_call:
+                args_str = _fmt_args(getattr(tool_call, "arguments", {}))
+                _console.print(
+                    f"\n[bold cyan]> {escape(tool_call.name)}[/bold cyan]({args_str})"
+                )
+
+        # ── tool execution (AgentSession) ─────────────────────────────
+        elif t == "tool_call_start":
+            name = getattr(event, "name", "")
+            args = getattr(event, "args", {}) or {}
+            args_str = _fmt_args(args)
+            self._status = f"running: {name}"
+            _console.print(f"[yellow]~[/yellow] [bold]{escape(name)}[/bold]({args_str})")
+
+        elif t == "tool_call_end":
+            name = getattr(event, "name", "")
+            is_error = getattr(event, "is_error", False)
+            result_text = getattr(event, "result_text", "")
+            self._status = "thinking..."
+            icon = "[red]![/red]" if is_error else "[green]+[/green]"
+            _console.print(f"{icon} [bold]{escape(name)}[/bold]")
+            preview = _fmt_result_preview(result_text)
+            if preview:
+                _console.print(preview)
+
+        # ── done: flush any remaining text (stream ended without text_end)
+        elif t == "done":
+            self._flush_text_block()
+            self._status = "ready"
+
+        # ── error ─────────────────────────────────────────────────────
+        elif t == "error":
+            self._flush_text_block()
+            self._status = "ready"
+            err = getattr(event, "error", None)
+            msg = getattr(err, "error_message", None) or str(err)
+            _console.print(f"[red]error:[/red] {escape(msg)}")
+
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
         """Run a single conversation turn."""
-        # Persist user message
         user_msg = UserMessage(content=user_input, timestamp=int(time.time() * 1000))
         self._persist_message(user_msg)
 
-        # Register event handlers for tool calls
-        self._agent_session.on_event(self._handle_event)
-
-        # Run the agent
+        self._turn_has_text = False
+        self._thinking_open = False
+        unsub = self._agent_session.on_event(self._handle_event)
         try:
             result = await self._agent_session.prompt(user_input)
         except Exception as exc:
-            print(f"\n[error] {exc}", file=sys.stderr)
+            _console.print(f"\n[red]error:[/red] {escape(str(exc))}")
             return None
+        finally:
+            unsub()
 
-        # Persist assistant message
         if result:
             self._persist_message(result)
 
         return result
 
-    def _handle_event(self, event: Any) -> None:
-        """Handle agent events for display."""
-        event_type = getattr(event, "type", "")
-        if event_type == "text_delta":
-            delta = getattr(event, "delta", "")
-            print(delta, end="", flush=True)
-        elif event_type == "tool_call_start":
-            name = getattr(event, "name", "")
-            args = getattr(event, "args", {})
-            self._on_tool_call_start(name, args)
-        elif event_type == "tool_call_end":
-            name = getattr(event, "name", "")
-            is_error = getattr(event, "is_error", False)
-            self._on_tool_call_end(name, is_error)
-        elif event_type == "text_end":
-            print()  # newline after streaming text
+    # ------------------------------------------------------------------
+    # Input area layout
+    # ------------------------------------------------------------------
+
+    def _state_line(self) -> str:
+        """One-line status shown below the input box."""
+        provider = getattr(self._model, "provider", "?")
+        model_id = getattr(self._model, "id", "?")
+        session_info = f"session:{self._session_id[:8]}" if self._session_id else "no session"
+        dot = "[green]●[/green]" if self._status == "ready" else "[yellow]●[/yellow]"
+        return f"{dot} [dim]{self._status}  ·  {provider}/{model_id}  ·  {session_info}[/dim]"
+
+    async def _prompt_input(self) -> str | None:
+        """Draw the bordered input area, return stripped text or None on exit."""
+        w = _console.width
+
+        # Tips — right-aligned, one line above the top border
+        tips = "/help  /clear  /model  /session  /exit"
+        _console.print(f"[dim]{tips}[/dim]", justify="right")
+
+        # Top rule — plain horizontal line spanning the terminal width
+        sys.stdout.write("─" * w + "\n")
+        sys.stdout.flush()
+
+        # Input line — the terminal wraps long input across multiple lines
+        # on its own, so the rule above/below grows with the input naturally.
+        try:
+            raw = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: input("\033[1m>\033[0m ")
+            )
+        except EOFError:
+            sys.stdout.write("\n" + "─" * w + "\n")
+            sys.stdout.flush()
+            return None
+        except KeyboardInterrupt:
+            sys.stdout.write("\n" + "─" * w + "\n")
+            sys.stdout.flush()
+            _console.print("[dim]interrupted[/dim]")
+            return ""
+
+        # Bottom rule
+        sys.stdout.write("─" * w + "\n")
+        sys.stdout.flush()
+
+        # State line immediately below bottom border
+        _console.print(self._state_line())
+
+        return raw.strip()
+
+    def _print_user_message(self, text: str) -> None:
+        """Display the user's message with a highlighted background."""
+        w = _console.width
+        # Pad to full terminal width so background fills the line
+        padded = f"  {text}  "
+        _console.print(f"[bold on grey23]{escape(padded):<{w}}[/bold on grey23]")
+        _console.print()
+
+    # ------------------------------------------------------------------
+    # REPL loop
+    # ------------------------------------------------------------------
 
     async def repl_loop(self) -> None:
         """Main REPL loop."""
         self._running = True
 
-        # Print banner
-        print(f"pi v0.83.0 (Python) — cwd: {self._cwd}")
         provider_name = getattr(self._model, "provider", "faux")
         model_name = getattr(self._model, "name", "unknown")
-        print(f"Provider: {provider_name} | Model: {model_name}")
-        print("Type your message. Use /help for commands, /exit to quit.\n")
+        model_id = getattr(self._model, "id", "?")
+
+        # One-line banner — right-aligned
+        _console.print(
+            f"[bold]pi[/bold] v0.83.0  [dim]·[/dim]"
+            f"  [cyan]{provider_name}[/cyan] / [cyan]{model_name}[/cyan]"
+            f"  [dim]({model_id})[/dim]"
+            f"  [dim]{self._cwd}[/dim]",
+            justify="right",
+        )
+        _console.print()
 
         while self._running:
-            try:
-                # Read input
-                user_input = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: input("\033[1m> \033[0m").strip()
-                )
-            except EOFError:
+            user_input = await self._prompt_input()
+
+            if user_input is None:  # EOF
                 break
-            except KeyboardInterrupt:
-                print("\n[interrupted]")
+            if not user_input:  # empty or interrupted
                 continue
 
-            if not user_input:
-                continue
-
-            # Handle slash commands
             if user_input.startswith("/"):
-                if self._handle_command(user_input):
-                    continue
-                else:
+                if not self._handle_command(user_input):
                     break
                 continue
 
-            # Run agent turn
-            print()  # blank line before response
+            _console.print()
+            self._print_user_message(user_input)
+            self._status = "thinking..."
             result = await self.run_turn(user_input)
-            print()  # blank line after response
+            self._status = "ready"
+            _console.print()
 
             if result and result.stop_reason == StopReason.ERROR:
                 error_msg = result.error_message or "Unknown error"
-                print(f"[error] {error_msg}", file=sys.stderr)
+                _console.print(f"[red]error:[/red] {escape(error_msg)}")
 
     def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
@@ -339,43 +497,52 @@ class InteractiveSession:
             return False
 
         if cmd == "/help":
-            print("Commands:")
-            print("  /help     Show this help")
-            print("  /exit     Exit Pi")
-            print("  /quit     Exit Pi")
-            print("  /model    Show current model")
-            print("  /clear    Clear conversation history")
-            print("  /tools    List available tools")
-            print("  /session  Show session info")
+            _console.print(
+                "\n[bold]Commands[/bold]\n"
+                "  [cyan]/help[/cyan]     Show this help\n"
+                "  [cyan]/exit[/cyan]     Exit Pi\n"
+                "  [cyan]/model[/cyan]    Show current model\n"
+                "  [cyan]/clear[/cyan]    Clear conversation history\n"
+                "  [cyan]/tools[/cyan]    List available tools\n"
+                "  [cyan]/session[/cyan]  Show session info\n"
+            )
             return True
 
         if cmd == "/model":
-            print(f"Provider: {getattr(self._model, 'provider', '?')}")
-            print(f"Model: {getattr(self._model, 'id', '?')}")
-            print(f"Context window: {getattr(self._model, 'context_window', '?')}")
+            _console.print(
+                f"Provider: [cyan]{getattr(self._model, 'provider', '?')}[/cyan]\n"
+                f"Model:    [cyan]{getattr(self._model, 'id', '?')}[/cyan]\n"
+                f"Context:  {getattr(self._model, 'context_window', '?')} tokens"
+            )
             return True
 
         if cmd == "/clear":
             self._agent_session._messages = []
-            print("[conversation cleared]")
+            _console.print("[dim]conversation cleared[/dim]")
             return True
 
         if cmd == "/tools":
             for tool in self._agent_session._tools:
-                print(f"  {tool.name}: {tool.description}")
+                _console.print(f"  [cyan]{tool.name}[/cyan]: {tool.description}")
             return True
 
         if cmd == "/session":
             if self._session_id:
-                print(f"Session ID: {self._session_id}")
-                print(f"Messages: {self._message_count}")
+                _console.print(
+                    f"Session ID: [dim]{self._session_id}[/dim]\n"
+                    f"Messages:   {self._message_count}"
+                )
             else:
-                print("[no session]")
+                _console.print("[dim]no active session[/dim]")
             return True
 
-        print(f"Unknown command: {command}")
+        _console.print(f"[yellow]Unknown command:[/yellow] {command}")
         return True
 
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
 
 async def run_interactive_mode(args: Args) -> int:
     """Run Pi in interactive mode."""
@@ -385,31 +552,27 @@ async def run_interactive_mode(args: Args) -> int:
     session_dir = get_session_dir()
     ensure_session_dir()
 
-    # Set up models
     models, model = _setup_models_with_settings(args)
     if model is None:
-        print("Error: No model available", file=sys.stderr)
+        _console.print("[red]error:[/red] No model available")
         return 1
 
-    # Set up session
     session_mgr = SessionManager(session_dir)
 
     session_id = None
     if args.continue_session or args.resume:
-        # Continue most recent session
         recent = session_mgr.continue_recent()
         if recent:
             session_id = recent.id
-            print(f"[continuing session: {recent.id}]")
+            _console.print(f"[dim]continuing session: {recent.id}[/dim]")
         else:
-            print("[no previous session found, starting new]")
+            _console.print("[dim]no previous session found, starting new[/dim]")
 
     if not session_id and not args.no_session:
         session_name = args.name or Path(cwd).name
         info = session_mgr.create_session(cwd=cwd, name=session_name)
         session_id = info.id
 
-    # Create and run interactive session
     session = InteractiveSession(
         models=models,
         model=model,
@@ -422,7 +585,7 @@ async def run_interactive_mode(args: Args) -> int:
     try:
         await session.repl_loop()
     except KeyboardInterrupt:
-        print("\n[exiting]")
+        _console.print("\n[dim]exiting[/dim]")
 
     return 0
 
