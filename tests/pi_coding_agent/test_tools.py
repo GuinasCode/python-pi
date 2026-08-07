@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+
+from pi_agent_core.shell import resolve_posix_shell
 from pi_coding_agent.tools import (
     edit_file,
     execute_bash,
@@ -11,6 +15,11 @@ from pi_coding_agent.tools import (
     list_files,
     read_file,
     write_file,
+)
+
+requires_posix_shell = pytest.mark.skipif(
+    os.name == "nt" and resolve_posix_shell() is None,
+    reason="no POSIX-compatible shell (bash/sh) found on PATH",
 )
 
 
@@ -24,6 +33,7 @@ class TestExecuteBash:
         result = execute_bash("exit 1")
         assert result.is_error
 
+    @requires_posix_shell
     def test_timeout(self) -> None:
         result = execute_bash("sleep 10", timeout=1)
         assert result.is_error

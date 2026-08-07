@@ -17,24 +17,24 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pi_ai import ImageContent, TextContent
 
+from .shell import build_subprocess_args
 from .types import AgentTool, AgentToolResult, AgentToolUpdateCallback
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
     "DEFAULT_MAX_LINES",
     "MAX_TIMEOUT_SECONDS",
+    "AgentToolExecutor",
     "BashToolDetails",
     "EditToolDetails",
     "ReadToolDetails",
     "TruncationResult",
-    "AgentToolExecutor",
     "create_bash_tool",
     "create_edit_tool",
     "create_read_tool",
@@ -478,10 +478,11 @@ def create_bash_tool(
         full_command = f"{command_prefix}\n{command}" if command_prefix else command
         work_dir = cwd or os.getcwd()
 
+        run_args, use_shell = build_subprocess_args(full_command)
         try:
             result = subprocess.run(
-                full_command,
-                shell=True,
+                run_args,
+                shell=use_shell,
                 capture_output=True,
                 text=True,
                 cwd=work_dir,
@@ -592,7 +593,7 @@ def create_read_tool(*, cwd: str | None = None) -> AgentTool:
 
             if mime_type == "image/bmp":
                 return text_result(
-                    f"Read image file [image/bmp]\n[Image omitted: BMP requires conversion.]"
+                    "Read image file [image/bmp]\n[Image omitted: BMP requires conversion.]"
                 )
             encoded = base64.b64encode(raw_bytes).decode("ascii")
             return AgentToolResult(

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pi_agent_core.shell import build_subprocess_args
+
 
 @dataclass
 class ToolResult:
@@ -41,10 +43,11 @@ def execute_bash(
 
     Mirrors packages/coding-agent/src/core/tools/bash.ts.
     """
+    run_args, use_shell = build_subprocess_args(command)
     try:
         result = subprocess.run(
-            command,
-            shell=True,
+            run_args,
+            shell=use_shell,
             capture_output=True,
             text=True,
             cwd=cwd,

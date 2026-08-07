@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from pi_agent_core.shell import resolve_posix_shell
 from pi_agent_core.tools import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
@@ -18,6 +18,11 @@ from pi_agent_core.tools import (
     resolve_tool_path,
     truncate_head,
     truncate_tail,
+)
+
+requires_posix_shell = pytest.mark.skipif(
+    os.name == "nt" and resolve_posix_shell() is None,
+    reason="no POSIX-compatible shell (bash/sh) found on PATH",
 )
 
 
@@ -122,12 +127,14 @@ class TestBashTool:
         assert result is not None
         assert "hello" in result.content[0].text
 
+    @requires_posix_shell
     @pytest.mark.asyncio
     async def test_bash_error(self) -> None:
         tool = AgentToolExecutor().create_bash_tool()
         with pytest.raises(RuntimeError, match="exited with code"):
             await tool.execute("t1", {"command": "false"}, None, None)
 
+    @requires_posix_shell
     @pytest.mark.asyncio
     async def test_bash_no_output(self) -> None:
         tool = AgentToolExecutor().create_bash_tool()
