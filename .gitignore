@@ -9,5 +9,9 @@ __pycache__/
 dist/
 build/
 
+# Secrets — never commit environment/credential files
+.env
+.env.*
+
 # Local scratch/lint-run output (not part of the codebase)
 *_out.txt
