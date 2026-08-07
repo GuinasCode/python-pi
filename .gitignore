@@ -12,6 +12,7 @@ build/
 # Secrets — never commit environment/credential files
 .env
 .env.*
+!.env.example
 
 # Local scratch/lint-run output (not part of the codebase)
 *_out.txt
