@@ -82,7 +82,6 @@ async def run_agent_loop(
         tools=context.tools,
     )
 
-    await _emit(emit, AgentEndEvent()) if False else None  # placeholder no-op
     from .types import AgentStartEvent
 
     await _emit(emit, AgentStartEvent())
@@ -387,14 +386,80 @@ async def _execute_tool_calls(
     signal: Any | None,
     emit: AgentEventSink,
 ) -> _ExecutedToolBatch:
-    """Execute tool calls sequentially.
-
-    The TypeScript version supports parallel execution; this port uses the
-    sequential path for all calls for simplicity. Tool execution mode parity
-    can be layered in later without changing the event sequence.
-    """
+    """Execute tool calls in parallel or sequentially based on config."""
     tool_calls = [c for c in assistant_message.content if getattr(c, "type", None) == "toolCall"]
+    if config.tool_execution == "parallel" and len(tool_calls) > 1:
+        return await _execute_tool_calls_parallel(current_context, assistant_message, tool_calls, config, signal, emit)
     return await _execute_tool_calls_sequential(current_context, assistant_message, tool_calls, config, signal, emit)
+
+
+async def _execute_tool_calls_parallel(
+    current_context: AgentContext,
+    assistant_message: AssistantMessage,
+    tool_calls: list[AgentToolCall],
+    config: AgentLoopConfig,
+    signal: Any | None,
+    emit: AgentEventSink,
+) -> _ExecutedToolBatch:
+    """Execute tool calls in parallel, emitting start events before any work begins."""
+    for tool_call in tool_calls:
+        await _emit(
+            emit,
+            ToolExecutionStartEvent(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                args=tool_call.arguments,
+            ),
+        )
+
+    async def _run_one(tool_call: AgentToolCall) -> dict[str, Any]:
+        preparation = await _prepare_tool_call(current_context, assistant_message, tool_call, config, signal)
+        if preparation["kind"] == "immediate":
+            return {
+                "tool_call": tool_call,
+                "result": preparation["result"],
+                "is_error": preparation["is_error"],
+            }
+        executed = await _execute_prepared_tool_call(preparation, signal, emit)
+        return await _finalize_executed_tool_call(
+            current_context, assistant_message, preparation, executed, config, signal
+        )
+
+    results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls], return_exceptions=True)
+
+    finalized_calls: list[dict[str, Any]] = []
+    messages: list[ToolResultMessage] = []
+    for tool_call, outcome in zip(tool_calls, results, strict=True):
+        if isinstance(outcome, BaseException):
+            finalized: dict[str, Any] = {
+                "tool_call": tool_call,
+                "result": _create_error_tool_result(str(outcome)),
+                "is_error": True,
+            }
+        else:
+            finalized = outcome  # type: ignore[assignment]
+
+        await _emit(
+            emit,
+            ToolExecutionEndEvent(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                result=finalized["result"],
+                is_error=finalized["is_error"],
+            ),
+        )
+        tool_result_message = _create_tool_result_message(
+            finalized["tool_call"], finalized["result"], is_error=finalized["is_error"]
+        )
+        await _emit(emit, MessageStartEvent(message=tool_result_message))
+        await _emit(emit, MessageEndEvent(message=tool_result_message))
+        finalized_calls.append(finalized)
+        messages.append(tool_result_message)
+
+    return _ExecutedToolBatch(
+        messages=messages,
+        terminate=_should_terminate_tool_batch(finalized_calls),
+    )
 
 
 def _find_tool(tools: list[Any] | None, name: str) -> Any | None:

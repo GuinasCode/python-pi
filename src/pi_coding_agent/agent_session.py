@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from pi_agent_core.types import AgentTool, AgentToolResult
 from pi_ai import (
     AssistantMessage,
     Context,
@@ -29,17 +30,41 @@ from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system
 from pi_coding_agent.tools import ToolResult, edit_file, execute_bash, grep_search, list_files, read_file, write_file
 
 
+@dataclass
+class _ToolCallStartEvent:
+    type: str = "tool_call_start"
+    name: str = ""
+    args: Any = None
+
+
+@dataclass
+class _ToolCallEndEvent:
+    type: str = "tool_call_end"
+    name: str = ""
+    is_error: bool = False
+    result_text: str = ""
+
+
+@dataclass
+class _SubagentProgressEvent:
+    type: str = "subagent_progress"
+    text: str = ""
+
+
 def _create_tool_result_message(
     tool_call: ToolCall,
     result: ToolResult,
     timestamp: int,
 ) -> ToolResultMessage:
     """Create a ToolResultMessage from a ToolResult."""
-    content: list[dict[str, str]] = result.content if result.content else [{"type": "text", "text": ""}]
+    raw = result.content if result.content else [{"type": "text", "text": ""}]
+    content = [TextContent(text=b.get("text", "")) for b in raw if b.get("type") == "text"]
+    if not content:
+        content = [TextContent(text="")]
     return ToolResultMessage(
         tool_call_id=tool_call.id,
         tool_name=tool_call.name,
-        content=content,  # type: ignore[arg-type]
+        content=content,
         details=result.details,
         is_error=result.is_error,
         timestamp=timestamp,
@@ -179,9 +204,12 @@ class AgentSessionOptions:
     append_system_prompt: str | None = None
     context_files: list[dict[str, str]] | None = None
     skills: list[Any] | None = None
+    # Can include AgentTool instances alongside plain Tool schemas.
     tools: list[Tool] | None = None
     thinking_level: str = "off"
     max_turns: int = 50
+    # When True, the subagent tool is automatically added to builtin tools.
+    enable_subagents: bool = True
 
 
 class AgentSession:
@@ -195,12 +223,29 @@ class AgentSession:
         self._append_system_prompt = options.append_system_prompt
         self._context_files = options.context_files or []
         self._skills = options.skills or []
-        self._tools = options.tools or _get_builtin_tools()
         self._thinking_level = options.thinking_level
         self._max_turns = options.max_turns
         self._messages: list[Message] = []
         self._event_listeners: list[Callable[[Any], None]] = []
         self._text_buffer = ""
+
+        base_tools: list[Tool] = options.tools if options.tools is not None else _get_builtin_tools()
+        if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
+            try:
+                from pi_coding_agent.subagent.tool import create_subagent_tool
+
+                def _on_subagent_progress(line: str) -> None:
+                    self._emit(_SubagentProgressEvent(text=line))
+
+                base_tools = [*base_tools, create_subagent_tool(
+                    cwd=self._cwd,
+                    config_dir=None,
+                    on_progress=_on_subagent_progress,
+                )]
+            except Exception:
+                pass
+
+        self._tools = base_tools
 
     def on_event(self, listener: Callable[[Any], None]) -> Callable[[]]:
         """Register an event listener."""
@@ -264,20 +309,23 @@ class AgentSession:
             if assistant_msg.stop_reason != StopReason.TOOL_USE:
                 return assistant_msg
 
-            # Execute tool calls
+            # Execute tool calls — support both AgentTool (async) and builtin (sync).
             for block in assistant_msg.content:
                 if block.type != "toolCall":
                     continue
                 tool_call = block
-                self._emit({"type": "tool_call_start", "name": tool_call.name, "args": tool_call.arguments})
-                result = _execute_tool(tool_call.name, tool_call.arguments)
-                self._emit({
-                    "type": "tool_call_end",
-                    "name": tool_call.name,
-                    "is_error": result.is_error,
-                })
-                tool_result = _create_tool_result_message(tool_call, result, int(time.time() * 1000))
-                self._messages.append(tool_result)
+                self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
+                result, is_error = await self._execute_tool_call(tool_call)
+                result_text = result[0].get("text", "") if result else ""
+                self._emit(_ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text))
+                tool_result_msg = ToolResultMessage(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    content=[TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"],
+                    is_error=is_error,
+                    timestamp=int(time.time() * 1000),
+                )
+                self._messages.append(tool_result_msg)
 
         return AssistantMessage(
             content=[TextContent(text="Max turns reached")],
@@ -287,6 +335,37 @@ class AgentSession:
             stop_reason=StopReason.LENGTH,
             timestamp=int(time.time() * 1000),
         )
+
+    async def _execute_tool_call(
+        self,
+        tool_call: ToolCall,
+    ) -> tuple[list[dict[str, str]], bool]:
+        """Execute a tool call, returning (content_dicts, is_error).
+
+        If the tool is an :class:`AgentTool` with an async ``execute``
+        callback, that is called directly.  Otherwise the call is dispatched
+        to the synchronous built-in executor.
+        """
+        for tool in self._tools:
+            if tool.name != tool_call.name:
+                continue
+            if isinstance(tool, AgentTool) and tool.execute is not None:
+                try:
+                    agent_result: AgentToolResult = await tool.execute(
+                        tool_call.id, tool_call.arguments, None, None
+                    )
+                    content = [
+                        {"type": "text", "text": b.text}
+                        for b in agent_result.content
+                        if hasattr(b, "text")
+                    ]
+                    return content or [{"type": "text", "text": ""}], False
+                except Exception as exc:
+                    return [{"type": "text", "text": str(exc)}], True
+
+        # Built-in synchronous tools
+        sync_result = _execute_tool(tool_call.name, tool_call.arguments)
+        return sync_result.content, sync_result.is_error
 
     def _compact_context_if_needed(self, max_messages: int = 40) -> None:
         """Basic compaction: keep the first system-relevant turn and most recent messages.

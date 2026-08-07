@@ -161,7 +161,7 @@ class _PendingMessageQueue:
 class _ActiveRun:
     """Bookkeeping for an in-flight agent run."""
 
-    task: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+    task: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     abort_event: asyncio.Event = field(default_factory=asyncio.Event)
     aborted: bool = False
 

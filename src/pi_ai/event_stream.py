@@ -33,7 +33,7 @@ class EventStream(Generic[T, R]):
     def _ensure_future(self) -> asyncio.Future[R]:
         if self._final_result_future is None:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -76,16 +76,15 @@ class EventStream(Generic[T, R]):
             elif self._done:
                 return
             else:
-                future: asyncio.Future[T | None] = asyncio.get_event_loop().create_future()
+                future: asyncio.Future[T | None] = asyncio.get_running_loop().create_future()
                 self._waiting.append(future)
-                result = await future
-                if result is None:
+                item = await future
+                if item is None:
                     return
-                yield result
+                yield item
 
-    @property
-    def result(self) -> asyncio.Future[R]:
-        return self._ensure_future()
+    async def result(self) -> R:
+        return await self._ensure_future()
 
 
 class AssistantMessageEventStream(EventStream[Any, AssistantMessage]):

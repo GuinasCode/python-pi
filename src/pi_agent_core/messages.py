@@ -14,11 +14,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pi_ai import (
-    AssistantMessage,
     ImageContent,
     Message,
     TextContent,
-    ToolResultMessage,
     UserMessage,
 )
 

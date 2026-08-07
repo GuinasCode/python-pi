@@ -8,3 +8,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local scratch/lint-run output (not part of the codebase)
+*_out.txt
