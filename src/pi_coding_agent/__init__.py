@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 APP_NAME = "pi"
 CONFIG_DIR_NAME = ".pi"
@@ -287,6 +288,13 @@ Arguments:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entry point."""
+    from dotenv import load_dotenv
+
+    # Load NVAPI_KEY / OPENAI_API_KEY / etc. from a .env file in the cwd (or
+    # a parent directory) before anything reads them. Real environment
+    # variables always take precedence (override=False).
+    load_dotenv(override=False)
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -305,6 +313,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if d["type"] == "error":
                 print(f"Error: {d['message']}", file=sys.stderr)
 
+    if args.export:
+        return _export_session(args)
+
     if args.print or args.mode in ("json", "rpc"):
         # Print mode: run prompt via the agent loop
         from pi_coding_agent.print_mode import run_print_mode_sync
@@ -315,6 +326,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     from pi_coding_agent.interactive_mode import run_interactive_sync
 
     return run_interactive_sync(args)
+
+
+def _export_session(args: Args) -> int:
+    """Export a session's message history to a self-contained HTML file."""
+    from pi_coding_agent.config import get_session_dir
+    from pi_coding_agent.export_html import render_session_html
+    from pi_coding_agent.session_manager import SessionManager
+
+    session_mgr = SessionManager(get_session_dir())
+
+    session_id = args.session_id
+    if not session_id:
+        recent = session_mgr.continue_recent()
+        session_id = recent.id if recent else None
+
+    if not session_id:
+        print("Error: no session to export (use --session-id or run a session first)", file=sys.stderr)
+        return 1
+
+    info = session_mgr.open_session(session_id)
+    if info is None:
+        print(f"Error: session not found: {session_id}", file=sys.stderr)
+        return 1
+
+    entries = session_mgr.get_entries(session_id)
+    title = info.name or f"Pi Session {session_id}"
+    html = render_session_html(entries, title=title)
+
+    assert args.export is not None
+    export_path = Path(args.export)
+    export_path.write_text(html, encoding="utf-8")
+    print(f"Exported session {session_id} to {export_path}")
+    return 0
 
 
 if __name__ == "__main__":
