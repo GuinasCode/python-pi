@@ -18,8 +18,9 @@ import json
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 from urllib.parse import quote
@@ -55,11 +56,11 @@ __all__ = [
     "SessionForkOptions",
     "SessionForkSelection",
     "SessionHead",
+    "SessionInfoEntry",
     "SessionMetadata",
     "SessionRepository",
     "SessionStats",
     "SessionTreeEntry",
-    "SessionInfoEntry",
     "ThinkingLevelChangeEntry",
     "create_session_id",
     "create_timestamp",
@@ -90,9 +91,11 @@ def _uuid_v7() -> str:
     high = (timestamp_ms << 16) | (7 << 12) | rand_a
     low = (0b10 << 62) | rand_b
 
-    # Pack as 128-bit integer and format
+    # Pack as 128-bit integer and format. Version/variant bits are already
+    # encoded above; passing version= here would additionally trigger stdlib
+    # validation that rejects version 7 on Python < 3.14.
     value = (high << 64) | low
-    return str(uuid.UUID(int=value, version=7))
+    return str(uuid.UUID(int=value))
 
 
 def create_session_id() -> str:
@@ -102,9 +105,9 @@ def create_session_id() -> str:
 
 def create_timestamp() -> str:
     """Create an ISO-8601 timestamp."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # --- Error types ---
@@ -1537,10 +1540,7 @@ class JsonlRepository:
         if not self._sessions_root.exists():
             return []
 
-        if cwd:
-            dirs = [self._get_session_dir(cwd)]
-        else:
-            dirs = [d for d in self._sessions_root.iterdir() if d.is_dir()]
+        dirs = [self._get_session_dir(cwd)] if cwd else [d for d in self._sessions_root.iterdir() if d.is_dir()]
 
         sessions: list[JsonlSessionMetadata] = []
         for dir_path in dirs:
@@ -1573,14 +1573,18 @@ class JsonlRepository:
         selection = create_session_fork_selection(options)
         fork_entries = await read_session_entries_for_fork(source_index, selection)
 
-        # Create new session with forked entries
+        # Create new session and replay the selected entries into its storage
         opts = JsonlSessionCreateOptions(
             id=options.id,
             cwd=source.cwd,
             parent_session_path=source.path,
             metadata=source.metadata,
         )
-        return await self.create(opts)
+        new_session = await self.create(opts)
+        storage = new_session._storage
+        for entry in fork_entries:
+            await storage.append_entry(entry)
+        return await create_session(storage, self._entry_transforms)
 
     async def dispose(self) -> None:
         self._disposed = True
