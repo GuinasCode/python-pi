@@ -38,6 +38,7 @@ _err_console = Console(highlight=False, soft_wrap=True, stderr=True)
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+
 def _fmt_args(args: Any) -> str:
     """Format tool arguments into a concise single-line representation."""
     if not args:
@@ -72,6 +73,7 @@ def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
 # ---------------------------------------------------------------------------
 # Model setup
 # ---------------------------------------------------------------------------
+
 
 def _setup_models(args: Args) -> tuple[MutableModels, Any]:
     """Set up models with available providers.
@@ -163,6 +165,7 @@ def _setup_models_with_settings(args: Args) -> tuple[MutableModels, Any]:
 # Interactive session
 # ---------------------------------------------------------------------------
 
+
 class InteractiveSession:
     """Interactive REPL session that maintains context and persists to disk."""
 
@@ -251,9 +254,7 @@ class InteractiveSession:
             if isinstance(content, str):
                 data["content"] = content
             elif isinstance(content, list):
-                data["content"] = [
-                    {"type": b.type, "text": b.text} if hasattr(b, "type") else str(b) for b in content
-                ]
+                data["content"] = [{"type": b.type, "text": b.text} if hasattr(b, "type") else str(b) for b in content]
         elif message.role == "assistant":
             data["content"] = [
                 {"type": b.type, "text": b.text}
@@ -272,8 +273,7 @@ class InteractiveSession:
             data["tool_name"] = message.tool_name
             data["is_error"] = message.is_error
             data["content"] = [
-                {"type": b.type, "text": b.text} if hasattr(b, "text") else {"type": b.type}
-                for b in message.content
+                {"type": b.type, "text": b.text} if hasattr(b, "text") else {"type": b.type} for b in message.content
             ]
             if message.details is not None:
                 data["details"] = message.details
@@ -336,9 +336,7 @@ class InteractiveSession:
             tool_call = getattr(event, "tool_call", None)
             if tool_call:
                 args_str = _fmt_args(getattr(tool_call, "arguments", {}))
-                _console.print(
-                    f"\n[bold {PASTEL_BLUE}]> {escape(tool_call.name)}[/bold {PASTEL_BLUE}]({args_str})"
-                )
+                _console.print(f"\n[bold {PASTEL_BLUE}]> {escape(tool_call.name)}[/bold {PASTEL_BLUE}]({args_str})")
 
         # ── tool execution (AgentSession) ─────────────────────────────
         elif t == "tool_call_start":
@@ -429,9 +427,7 @@ class InteractiveSession:
         # Input line — the terminal wraps long input across multiple lines
         # on its own, so the rule above/below grows with the input naturally.
         try:
-            raw = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: input("\033[1m>\033[0m ")
-            )
+            raw = await asyncio.get_running_loop().run_in_executor(None, lambda: input("\033[1m>\033[0m "))
         except EOFError:
             sys.stdout.write("\n" + "─" * w + "\n")
             sys.stdout.flush()
@@ -543,10 +539,7 @@ class InteractiveSession:
 
         if cmd == "/session":
             if self._session_id:
-                _console.print(
-                    f"Session ID: [dim]{self._session_id}[/dim]\n"
-                    f"Messages:   {self._message_count}"
-                )
+                _console.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
             else:
                 _console.print("[dim]no active session[/dim]")
             return True
@@ -558,6 +551,7 @@ class InteractiveSession:
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
+
 
 async def run_interactive_mode(args: Args) -> int:
     """Run Pi in interactive mode."""

@@ -5,10 +5,10 @@ Uses the NVIDIA Inference API endpoint for Kimi K2.6 access.
 
 Usage:
     export NVAPI_KEY="nvapi-..."
-    
+
     from pi_ai.providers.nvidia_moonshot import nvidia_moonshot_provider
     from pi_ai import Model
-    
+
     model, models, auth = nvidia_moonshot_provider(Model(id="moonshotai/kimi-k2.6"))
 """
 
@@ -115,15 +115,14 @@ async def _stream_kimi(
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if msg.role == "user":
-            content = msg.content if isinstance(msg.content, str) else "".join(
-                c.text if hasattr(c, "text") else "" for c in msg.content
+            content = (
+                msg.content
+                if isinstance(msg.content, str)
+                else "".join(c.text if hasattr(c, "text") else "" for c in msg.content)
             )
             messages.append({"role": "user", "content": content})
         elif msg.role == "assistant":
-            content = "".join(
-                block.text if block.type == "text" else ""
-                for block in msg.content
-            )
+            content = "".join(block.text if block.type == "text" else "" for block in msg.content)
             messages.append({"role": "assistant", "content": content})
 
     if context.system_prompt:
@@ -143,23 +142,28 @@ async def _stream_kimi(
     if context.tools:
         tools_list: list[dict[str, Any]] = []
         for tool in context.tools:
-            tools_list.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            })
+            tools_list.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+            )
         payload["tools"] = tools_list
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client, client.stream(
-            "POST",
-            DEFAULT_BASE_URL,
-            headers=headers,
-            json=payload,
-        ) as response:
+        async with (
+            httpx.AsyncClient(timeout=120.0) as client,
+            client.stream(
+                "POST",
+                DEFAULT_BASE_URL,
+                headers=headers,
+                json=payload,
+            ) as response,
+        ):
             if response.status_code != 200:
                 error_text = await response.aread()
                 stream.push(

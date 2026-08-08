@@ -6,7 +6,7 @@ for basic usage. This provider uses OpenRouter as the backend.
 Usage:
     from pi_ai.providers.openrouter_moonshot import openrouter_moonshot_provider
     from pi_ai import Model
-    
+
     model, models, meta = openrouter_moonshot_provider(Model(id="test"))
 """
 
@@ -109,15 +109,14 @@ async def _stream_kimi(
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if msg.role == "user":
-            content = msg.content if isinstance(msg.content, str) else "".join(
-                c.text if hasattr(c, "text") else "" for c in msg.content
+            content = (
+                msg.content
+                if isinstance(msg.content, str)
+                else "".join(c.text if hasattr(c, "text") else "" for c in msg.content)
             )
             messages.append({"role": "user", "content": content})
         elif msg.role == "assistant":
-            content = "".join(
-                block.text if block.type == "text" else ""
-                for block in msg.content
-            )
+            content = "".join(block.text if block.type == "text" else "" for block in msg.content)
             messages.append({"role": "assistant", "content": content})
 
     if context.system_prompt:
@@ -136,14 +135,16 @@ async def _stream_kimi(
     if context.tools:
         tools_list: list[dict[str, Any]] = []
         for tool in context.tools:
-            tools_list.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            })
+            tools_list.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+            )
         payload["tools"] = tools_list
 
     try:
@@ -158,9 +159,8 @@ async def _stream_kimi(
         ):
             if response.status_code != 200:
                 error_text = await response.aread()
-                stream.push(
-                    ErrorEvent(reason="error", error=f"OpenRouter API error {response.status_code}: {error_text.decode()}")
-                )
+                error_msg = f"OpenRouter API error {response.status_code}: {error_text.decode()}"
+                stream.push(ErrorEvent(reason="error", error=error_msg))
                 stream.end(f"OpenRouter API error {response.status_code}")
                 return
 

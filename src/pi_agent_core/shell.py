@@ -45,7 +45,7 @@ def resolve_posix_shell() -> str | None:
     if os.name != "nt":
         return None
 
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
 
     candidates: list[str] = []
     for name in ("bash", "sh"):

@@ -157,7 +157,7 @@ def create_subagent_tool(
             {
                 "title": "parallel",
                 "description": f"Run multiple agents concurrently (max {_PARALLEL_MAX_TASKS}, "
-                               f"{_PARALLEL_CONCURRENCY} at a time). Available: {agent_list_str}",
+                f"{_PARALLEL_CONCURRENCY} at a time). Available: {agent_list_str}",
                 "required": ["tasks"],
                 "properties": {
                     "tasks": {

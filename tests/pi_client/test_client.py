@@ -24,24 +24,26 @@ class TestClientState:
 
     def test_update_snapshot(self) -> None:
         state = ClientState()
-        state.update_snapshot({
-            "serverId": "server-1",
-            "protocolVersion": 2,
-            "sessions": [
-                {
-                    "id": "s1",
-                    "name": "Session 1",
-                    "cwd": "/tmp",
-                    "createdAt": 100,
-                    "updatedAt": 200,
-                    "phase": "idle",
-                    "model": {"provider": "test", "id": "model"},
-                    "thinkingLevel": "off",
-                    "attached": False,
-                    "locked": False,
-                }
-            ],
-        })
+        state.update_snapshot(
+            {
+                "serverId": "server-1",
+                "protocolVersion": 2,
+                "sessions": [
+                    {
+                        "id": "s1",
+                        "name": "Session 1",
+                        "cwd": "/tmp",
+                        "createdAt": 100,
+                        "updatedAt": 200,
+                        "phase": "idle",
+                        "model": {"provider": "test", "id": "model"},
+                        "thinkingLevel": "off",
+                        "attached": False,
+                        "locked": False,
+                    }
+                ],
+            }
+        )
         assert state.server_id == "server-1"
         assert state.protocol_version == 2
         assert "s1" in state.sessions
@@ -65,6 +67,7 @@ class TestPiClient:
         client.dispose()
         with pytest.raises(ClientDisposedError):
             import asyncio
+
             asyncio.run(client._send_prompt("s1", "test"))
 
     def test_event_listener(self) -> None:

@@ -192,17 +192,18 @@ def _create_stream(
 
     async def _run_stream() -> None:
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client, client.stream(
-                "POST",
-                DEFAULT_BASE_URL + "/chat/completions",
-                headers=headers,
-                json=payload,
-            ) as response:
+            async with (
+                httpx.AsyncClient(timeout=120.0) as client,
+                client.stream(
+                    "POST",
+                    DEFAULT_BASE_URL + "/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as response,
+            ):
                 if response.status_code != 200:
                     error_text = await response.aread()
-                    err = _make_error_message(
-                        f"NVIDIA API error {response.status_code}: {error_text.decode()}"
-                    )
+                    err = _make_error_message(f"NVIDIA API error {response.status_code}: {error_text.decode()}")
                     stream.push(ErrorEvent(reason="error", error=err))
                     stream.end(err)
                     return
@@ -283,9 +284,7 @@ def _create_stream(
                         args = {}
                     tool_call = ToolCall(id=tc_data["id"], name=tc_data["name"], arguments=args)
                     partial.content.append(tool_call)
-                    stream.push(
-                        ToolCallEndEvent(content_index=content_index, tool_call=tool_call, partial=partial)
-                    )
+                    stream.push(ToolCallEndEvent(content_index=content_index, tool_call=tool_call, partial=partial))
                     content_index += 1
 
                 # Determine stop reason

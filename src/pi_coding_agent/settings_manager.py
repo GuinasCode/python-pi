@@ -41,11 +41,13 @@ class CompactionSettings:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            k: v for k, v in (
+            k: v
+            for k, v in (
                 ("enabled", self.enabled),
                 ("reserveTokens", self.reserve_tokens),
                 ("keepRecentTokens", self.keep_recent_tokens),
-            ) if v is not None
+            )
+            if v is not None
         }
 
 
@@ -282,10 +284,7 @@ def migrate_settings(settings: dict[str, Any]) -> dict[str, Any]:
     skills = result.get("skills")
     if isinstance(skills, dict) and not isinstance(skills, list):
         skills_settings = skills
-        if (
-            skills_settings.get("enableSkillCommands") is not None
-            and result.get("enableSkillCommands") is None
-        ):
+        if skills_settings.get("enableSkillCommands") is not None and result.get("enableSkillCommands") is None:
             result["enableSkillCommands"] = skills_settings["enableSkillCommands"]
         custom_dirs = skills_settings.get("customDirectories")
         if isinstance(custom_dirs, list) and len(custom_dirs) > 0:
@@ -370,10 +369,12 @@ class SettingsManager:
         self._modified_nested_fields: dict[str, set[str]] = {}
         self._modified_project_fields: set[str] = set()
         self._modified_project_nested_fields: dict[str, set[str]] = {}
-        self._settings = Settings(deep_merge_settings(
-            self._global_settings.to_dict(),
-            self._project_settings.to_dict(),
-        ))
+        self._settings = Settings(
+            deep_merge_settings(
+                self._global_settings.to_dict(),
+                self._project_settings.to_dict(),
+            )
+        )
 
     # --- Factory methods ---
 
@@ -396,7 +397,7 @@ class SettingsManager:
         options: SettingsManagerCreateOptions | None = None,
     ) -> SettingsManager:
         """Create a SettingsManager from an arbitrary storage backend."""
-        project_trusted = (options.project_trusted if options and options.project_trusted is not None else True)
+        project_trusted = options.project_trusted if options and options.project_trusted is not None else True
         global_load = cls._try_load_from_storage(storage, "global")
         project_load = cls._try_load_from_storage(storage, "project", project_trusted)
         initial_errors: list[SettingsError] = []
@@ -479,20 +480,24 @@ class SettingsManager:
         if not trusted:
             self._project_settings = Settings()
             self._project_settings_load_error = None
-            self._settings = Settings(deep_merge_settings(
-                self._global_settings.to_dict(),
-                self._project_settings.to_dict(),
-            ))
+            self._settings = Settings(
+                deep_merge_settings(
+                    self._global_settings.to_dict(),
+                    self._project_settings.to_dict(),
+                )
+            )
             return
         project_load = self._try_load_from_storage(self._storage, "project", trusted)
         self._project_settings = project_load[0]
         self._project_settings_load_error = project_load[1]
         if project_load[1]:
             self._record_error("project", project_load[1])
-        self._settings = Settings(deep_merge_settings(
-            self._global_settings.to_dict(),
-            self._project_settings.to_dict(),
-        ))
+        self._settings = Settings(
+            deep_merge_settings(
+                self._global_settings.to_dict(),
+                self._project_settings.to_dict(),
+            )
+        )
 
     def reload(self) -> None:
         """Reload settings from storage."""
@@ -517,10 +522,12 @@ class SettingsManager:
             self._project_settings_load_error = project_load[1]
             self._record_error("project", project_load[1])
 
-        self._settings = Settings(deep_merge_settings(
-            self._global_settings.to_dict(),
-            self._project_settings.to_dict(),
-        ))
+        self._settings = Settings(
+            deep_merge_settings(
+                self._global_settings.to_dict(),
+                self._project_settings.to_dict(),
+            )
+        )
 
     def apply_overrides(self, overrides: dict[str, Any]) -> None:
         """Apply additional overrides on top of current settings."""
@@ -584,10 +591,12 @@ class SettingsManager:
         self._storage.with_lock(scope, transform)
 
     def _save(self) -> None:
-        self._settings = Settings(deep_merge_settings(
-            self._global_settings.to_dict(),
-            self._project_settings.to_dict(),
-        ))
+        self._settings = Settings(
+            deep_merge_settings(
+                self._global_settings.to_dict(),
+                self._project_settings.to_dict(),
+            )
+        )
         if self._global_settings_load_error:
             return
         snapshot = Settings(self._global_settings.to_dict())
@@ -599,10 +608,12 @@ class SettingsManager:
     def _save_project_settings(self, settings: Settings) -> None:
         self._assert_project_trusted_for_write()
         self._project_settings = Settings(settings.to_dict())
-        self._settings = Settings(deep_merge_settings(
-            self._global_settings.to_dict(),
-            self._project_settings.to_dict(),
-        ))
+        self._settings = Settings(
+            deep_merge_settings(
+                self._global_settings.to_dict(),
+                self._project_settings.to_dict(),
+            )
+        )
         if self._project_settings_load_error:
             return
         snapshot = Settings(self._project_settings.to_dict())
@@ -915,6 +926,7 @@ class SettingsManager:
     def set_project_packages(self, packages: list[PackageSource]) -> None:
         def update(settings: Settings) -> None:
             settings.set("packages", packages)
+
         self._update_project_settings("packages", update)
 
     def get_extension_paths(self) -> list[str]:
@@ -929,6 +941,7 @@ class SettingsManager:
     def set_project_extension_paths(self, paths: list[str]) -> None:
         def update(settings: Settings) -> None:
             settings.set("extensions", paths)
+
         self._update_project_settings("extensions", update)
 
     def get_skill_paths(self) -> list[str]:
@@ -943,6 +956,7 @@ class SettingsManager:
     def set_project_skill_paths(self, paths: list[str]) -> None:
         def update(settings: Settings) -> None:
             settings.set("skills", paths)
+
         self._update_project_settings("skills", update)
 
     def get_prompt_template_paths(self) -> list[str]:
@@ -957,6 +971,7 @@ class SettingsManager:
     def set_project_prompt_template_paths(self, paths: list[str]) -> None:
         def update(settings: Settings) -> None:
             settings.set("prompts", paths)
+
         self._update_project_settings("prompts", update)
 
     def get_theme_paths(self) -> list[str]:
@@ -971,6 +986,7 @@ class SettingsManager:
     def set_project_theme_paths(self, paths: list[str]) -> None:
         def update(settings: Settings) -> None:
             settings.set("themes", paths)
+
         self._update_project_settings("themes", update)
 
     def get_enable_skill_commands(self) -> bool:

@@ -39,7 +39,7 @@ class TestPathUtils:
         assert normalize_tool_path("foo/bar") == "foo/bar"
 
     def test_normalize_unicode_spaces(self) -> None:
-        assert normalize_tool_path("foo\u00A0bar") == "foo bar"
+        assert normalize_tool_path("foo\u00a0bar") == "foo bar"
 
     def test_resolve_relative(self, temp_dir: Path) -> None:
         result = resolve_tool_path("test.txt", cwd=str(temp_dir))
@@ -103,7 +103,7 @@ class TestImageDetection:
     def test_png(self) -> None:
         # Minimal PNG header
         data = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
-        data += b"\x00\x00\x00\x0D" + b"IHDR" + b"\x00" * 20
+        data += b"\x00\x00\x00\x0d" + b"IHDR" + b"\x00" * 20
         result = detect_supported_image_mime_type(data)
         assert result == "image/png"
 
