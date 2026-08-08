@@ -16,6 +16,16 @@ def uuid() -> str:
     return str(_uuid.uuid4())
 
 
+def describe_exception(exc: BaseException) -> str:
+    """A human-readable, never-empty description of *exc*.
+
+    Some exceptions (e.g. connection-level httpx errors) stringify to "" —
+    falling back to the exception's class name keeps error messages
+    non-empty so callers don't need a second ``or "Unknown error"`` guard.
+    """
+    return str(exc) or exc.__class__.__name__
+
+
 def hash_string(value: str) -> str:
     """SHA-256 hex digest of a string."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()

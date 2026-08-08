@@ -375,7 +375,10 @@ class InteractiveSession:
             self._flush_text_block()
             self._status = "ready"
             err = getattr(event, "error", None)
-            msg = getattr(err, "error_message", None) or str(err)
+            if isinstance(err, str):
+                msg = err or "Unknown error"
+            else:
+                msg = getattr(err, "error_message", None) or "Unknown error"
             _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:

@@ -31,6 +31,7 @@ from pi_ai import (
     UsageCost,
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
+from pi_ai.utils import describe_exception
 
 DEFAULT_API = "openai-completions"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -331,7 +332,7 @@ def _create_openai_provider(
                 provider=model.provider,
                 model=model.id,
                 stop_reason=StopReason.ERROR,
-                error_message=str(exc),
+                error_message=describe_exception(exc),
                 timestamp=int(time.time() * 1000),
             )
             stream.push(ErrorEvent(reason="error", error=error_msg))

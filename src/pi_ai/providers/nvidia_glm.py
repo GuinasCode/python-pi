@@ -39,6 +39,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
+from pi_ai.utils import describe_exception
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 MAX_TOKENS = 16384
@@ -306,7 +307,7 @@ def _create_stream(
                     stream.end(partial)
 
         except Exception as exc:
-            err = _make_error_message(str(exc))
+            err = _make_error_message(describe_exception(exc))
             stream.push(ErrorEvent(reason="error", error=err))
             stream.end(err)
 

@@ -37,6 +37,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
+from pi_ai.utils import describe_exception
 
 NIGHTLY_API = "openai"  # Uses OpenAI-compatible API format
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -190,8 +191,9 @@ async def _stream_kimi(
 
             stream.end("DONE")
     except Exception as exc:
-        stream.push(ErrorEvent(reason="error", error=str(exc)))
-        stream.end(str(exc))
+        msg = describe_exception(exc)
+        stream.push(ErrorEvent(reason="error", error=msg))
+        stream.end(msg)
 
 
 async def _process_kimi_chunk(

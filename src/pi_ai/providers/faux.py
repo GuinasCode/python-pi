@@ -32,6 +32,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.models import Provider
+from pi_ai.utils import describe_exception
 
 DEFAULT_API = "faux"
 DEFAULT_PROVIDER = "faux"
@@ -229,7 +230,7 @@ def _create_error_message(error: Exception, api: str, provider: str, model_id: s
         model=model_id,
         usage=copy.deepcopy(DEFAULT_USAGE),
         stop_reason=StopReason.ERROR,
-        error_message=str(error),
+        error_message=describe_exception(error),
         timestamp=int(time.time() * 1000),
     )
 
