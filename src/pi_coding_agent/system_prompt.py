@@ -21,6 +21,9 @@ class BuildSystemPromptOptions:
     cwd: str = ""
     context_files: list[dict[str, str]] | None = None
     skills: list[Any] | None = None
+    # Whether the user can be asked a follow-up question and reply in a
+    # later turn (true for interactive mode, false for print/subagent runs).
+    interactive: bool = True
 
 
 def build_system_prompt(options: BuildSystemPromptOptions) -> str:
@@ -51,11 +54,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     tools = options.selected_tools or ["read", "bash", "edit", "write"]
     tool_snippets = options.tool_snippets or {}
     visible_tools = [name for name in tools if name in tool_snippets]
-    tools_list = (
-        "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools)
-        if visible_tools
-        else "(none)"
-    )
+    tools_list = "\n".join(f"- {name}: {tool_snippets[name]}" for name in visible_tools) if visible_tools else "(none)"
 
     guidelines_set: set[str] = set()
     guidelines_list: list[str] = []
@@ -81,6 +80,27 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
 
     add_guideline("Be concise in your responses")
     add_guideline("Show file paths clearly when working with files")
+    add_guideline(
+        "Follow the literal contract of the user's request: the exact deliverable "
+        'format, scope, and constraints they specified (e.g. "only propose a diff, '
+        "don't touch the code\" means literally emit a diff, not prose or an actual "
+        "edit; \"just answer, don't implement\" means don't call write/edit tools)."
+    )
+    if options.interactive:
+        add_guideline(
+            "If your own reasoning concludes the requested contract is not the best "
+            "approach, do not silently substitute your own approach. State your "
+            "reasoning and ask the user which path they want, then stop and wait for "
+            "their reply before proceeding — don't decide on their behalf."
+        )
+    else:
+        add_guideline(
+            "If your own reasoning concludes the requested contract is not the best "
+            "approach, do not silently substitute your own approach either. There is "
+            "no interactive session to ask a follow-up in, so: follow the literal "
+            "contract as given, and clearly flag the concern and your suggested "
+            "alternative in the response instead of unilaterally deviating."
+        )
 
     guidelines = "\n".join(f"- {g}" for g in guidelines_list)
 

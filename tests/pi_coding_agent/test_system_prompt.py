@@ -79,3 +79,26 @@ def test_no_tools() -> None:
     )
     prompt = build_system_prompt(opts)
     assert "(none)" in prompt
+
+
+def test_contract_adherence_guideline_always_present() -> None:
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp"))
+    assert "literal contract" in prompt
+
+
+def test_interactive_prompts_to_ask_and_wait() -> None:
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp", interactive=True))
+    assert "ask the user which path" in prompt
+    assert "stop and wait for" in prompt
+
+
+def test_non_interactive_flags_instead_of_asking() -> None:
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp", interactive=False))
+    assert "no interactive session" in prompt
+    assert "ask the user which path" not in prompt
+
+
+def test_custom_prompt_skips_contract_guideline() -> None:
+    """Subagent personas (custom_prompt) keep their own scope — no injected guideline."""
+    prompt = build_system_prompt(BuildSystemPromptOptions(custom_prompt="You are a scout.", cwd="/tmp"))
+    assert "literal contract" not in prompt
