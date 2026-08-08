@@ -11,7 +11,9 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+
+from pi_protocol import JsonValue
 
 
 @dataclass
@@ -35,7 +37,24 @@ class SQLiteSessionRepository:
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
-        self._init_schema()
+        self._closed = False
+        try:
+            self._init_schema()
+        except Exception:
+            self._conn.close()
+            self._closed = True
+            raise
+
+    def __enter__(self) -> SQLiteSessionRepository:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def _init_schema(self) -> None:
         """Initialize the database schema."""
@@ -143,7 +162,7 @@ class SQLiteSessionRepository:
     def append_entry(
         self,
         session_id: str,
-        data: dict[str, Any],
+        data: dict[str, JsonValue],
         *,
         parent_seq: int | None = None,
     ) -> int:
@@ -170,7 +189,7 @@ class SQLiteSessionRepository:
         *,
         from_seq: int = 0,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, JsonValue]]:
         """Get entries for a session."""
         rows = self._conn.execute(
             "SELECT seq, parent_seq, data FROM session_entries WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?",
@@ -184,10 +203,13 @@ class SQLiteSessionRepository:
         *,
         session_id: str | None = None,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, JsonValue]]:
         """Search session entries."""
-        sql = "SELECT session_id, seq, content FROM session_fts WHERE content LIKE ?"
-        params: list[Any] = [f"%{query}%"]
+        # Escape SQLite LIKE metacharacters so a query containing `%` or `_`
+        # matches those characters literally instead of as wildcards.
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        sql = "SELECT session_id, seq, content FROM session_fts WHERE content LIKE ? ESCAPE '\\'"
+        params: list[str | int] = [f"%{escaped}%"]
         if session_id is not None:
             sql += " AND session_id = ?"
             params.append(session_id)
@@ -197,7 +219,10 @@ class SQLiteSessionRepository:
         return [{"session_id": row["session_id"], "seq": row["seq"], "content": row["content"]} for row in rows]
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection. Safe to call more than once."""
+        if self._closed:
+            return
+        self._closed = True
         self._conn.close()
 
 

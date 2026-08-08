@@ -90,3 +90,31 @@ class TestSQLiteSessionRepository:
         assert opened is not None
         assert opened.revision == 1
         repo.close()
+
+    def test_context_manager_closes_on_exit(self) -> None:
+        with SQLiteSessionRepository(":memory:") as repo:
+            repo.create_session()
+        assert repo._closed is True
+
+    def test_close_is_idempotent(self) -> None:
+        repo = SQLiteSessionRepository(":memory:")
+        repo.close()
+        repo.close()  # must not raise sqlite3.ProgrammingError
+
+    def test_search_matches_literal_percent(self) -> None:
+        repo = SQLiteSessionRepository(":memory:")
+        session = repo.create_session()
+        repo.append_entry(session.id, {"text": "discount: 50% off"})
+        repo._conn.execute(
+            "INSERT INTO session_fts (session_id, seq, content) VALUES (?, 0, ?)",
+            (session.id, "discount: 50% off"),
+        )
+        repo._conn.commit()
+
+        results = repo.search("50%")
+        assert len(results) == 1
+
+        # A literal query with no % in the data must not match everything.
+        no_match = repo.search("90%")
+        assert no_match == []
+        repo.close()
