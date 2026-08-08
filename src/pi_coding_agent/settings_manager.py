@@ -637,7 +637,8 @@ class SettingsManager:
     # --- Typed accessors ---
 
     def get_last_changelog_version(self) -> str | None:
-        return self._settings.get("lastChangelogVersion")
+        value = self._settings.get("lastChangelogVersion")
+        return value if isinstance(value, str) else None
 
     def set_last_changelog_version(self, version: str) -> None:
         self._global_settings.set("lastChangelogVersion", version)
@@ -651,10 +652,12 @@ class SettingsManager:
         return str(Path(session_dir).resolve())
 
     def get_default_provider(self) -> str | None:
-        return self._settings.get("defaultProvider")
+        value = self._settings.get("defaultProvider")
+        return value if isinstance(value, str) else None
 
     def get_default_model(self) -> str | None:
-        return self._settings.get("defaultModel")
+        value = self._settings.get("defaultModel")
+        return value if isinstance(value, str) else None
 
     def set_default_provider(self, provider: str) -> None:
         self._global_settings.set("defaultProvider", provider)
@@ -703,7 +706,8 @@ class SettingsManager:
         self._save()
 
     def get_default_thinking_level(self) -> str | None:
-        return self._settings.get("defaultThinkingLevel")
+        value = self._settings.get("defaultThinkingLevel")
+        return value if isinstance(value, str) else None
 
     def set_default_thinking_level(self, level: str) -> None:
         self._global_settings.set("defaultThinkingLevel", level)
@@ -867,7 +871,8 @@ class SettingsManager:
         self._save()
 
     def get_shell_command_prefix(self) -> str | None:
-        return self._settings.get("shellCommandPrefix")
+        value = self._settings.get("shellCommandPrefix")
+        return value if isinstance(value, str) else None
 
     def set_shell_command_prefix(self, prefix: str | None) -> None:
         self._global_settings.set("shellCommandPrefix", prefix)
@@ -903,7 +908,8 @@ class SettingsManager:
         return bool(self._settings.get("enableAnalytics", False))
 
     def get_tracking_id(self) -> str | None:
-        return self._settings.get("trackingId")
+        value = self._settings.get("trackingId")
+        return value if isinstance(value, str) else None
 
     def set_enable_analytics(self, enabled: bool) -> None:
         self._global_settings.set("enableAnalytics", enabled)

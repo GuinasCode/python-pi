@@ -64,11 +64,11 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
             from pi_ai.providers.openai import openai_provider
 
             model, stream_fn = openai_provider(api_key=openai_key)
-            provider = Provider(
+            provider: Provider[Any] = Provider(
                 id="openai",
                 name="OpenAI",
                 models=[model],
-                stream_fn=stream_fn,  # type: ignore[arg-type]
+                stream_fn=stream_fn,
             )
             models.set_provider(provider)
             return models, model
