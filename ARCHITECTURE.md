@@ -2,6 +2,8 @@
 
 This document captures the initial architecture decision record for converting `python-pi` from the current TypeScript monorepo to a pure Python project.
 
+**Status note:** the plan below is the original ADR and is largely implemented, with one exception — `pi_evals` was never ported and is not part of the current package layout (`src/` has no `pi_evals/`, and it is not listed in `pyproject.toml`). References to it further down are historical; treat them as future/unimplemented scope, not current state.
+
 ## Scope Reality Check
 
 The repository currently contains 1,049 TypeScript/TSX/declaration files and roughly 237k lines across production, tests, examples, scripts, and package configs. The conversion is therefore a full product rewrite, not a mechanical migration.

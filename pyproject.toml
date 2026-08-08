@@ -43,7 +43,6 @@ packages = [
     "src/pi_client",
     "src/pi_server",
     "src/pi_storage_sqlite",
-    "src/pi_evals",
 ]
 
 [tool.ruff]
@@ -59,8 +58,17 @@ ignore = []
 python_version = "3.11"
 strict = true
 mypy_path = "src"
+# Packages that pass `mypy --strict` cleanly. Expand this list as pi_ai and
+# pi_coding_agent are brought to a clean state (tracked: `mypy src/` finds
+# ~206 errors there, concentrated in un-narrowed content-block unions in the
+# provider modules and interactive_mode.py — see CONTRIBUTING.md).
 packages = [
     "pi_protocol",
+    "pi_tui",
+    "pi_client",
+    "pi_server",
+    "pi_storage_sqlite",
+    "pi_agent_core",
 ]
 
 [tool.pytest.ini_options]
