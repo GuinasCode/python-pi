@@ -17,15 +17,8 @@ uv sync --extra dev
 # Run checks before committing
 uv run ruff check src/ tests/
 uv run pytest tests/ -q
-uv run mypy   # checks [tool.mypy] packages in pyproject.toml; see note below
+uv run mypy src/
 ```
-
-`mypy` currently only enforces strict typing on the packages listed under
-`[tool.mypy] packages` in `pyproject.toml` (pi_protocol, pi_tui, pi_client,
-pi_server, pi_storage_sqlite, pi_agent_core). `pi_ai` and `pi_coding_agent`
-are not yet clean under `--strict` — if you're working in those packages,
-run `uv run mypy src/pi_ai` (or the relevant path) to check your changes,
-and add the package to the list once it passes.
 
 ## Code Quality
 

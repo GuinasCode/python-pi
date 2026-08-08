@@ -19,10 +19,7 @@
 
 - After code changes: `uv run ruff check src/ tests/`
 - Run tests: `uv run pytest tests/ -q`
-- Type check: `uv run mypy` (checks the packages listed under `[tool.mypy] packages` in
-  pyproject.toml — currently pi_protocol, pi_tui, pi_client, pi_server, pi_storage_sqlite,
-  pi_agent_core. `mypy src/` also runs but is not yet clean for pi_ai/pi_coding_agent;
-  add a package to the list once it passes strict mode cleanly)
+- Type check: `uv run mypy src/`
 - Security audit: `uv run pip-audit`
 
 ## Git
