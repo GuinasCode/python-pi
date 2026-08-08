@@ -55,7 +55,7 @@ DEFAULT_MAX_BYTES = 256_000  # 256 KB
 MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000
 
 _UNICODE_SPACES = re.compile(r"[\u00A0\u2000-\u200A\u202F\u205F\u3000]")
-_NARROW_NO_BREAK_SPACE = "\u202F"
+_NARROW_NO_BREAK_SPACE = "\u202f"
 
 
 # --- Path utilities (path-utils.ts) ---
@@ -137,7 +137,9 @@ def _truncate_lines(content: str, max_lines: int) -> tuple[str, int, bool]:
     return "\n".join(kept), max_lines, True
 
 
-def truncate_tail(content: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = DEFAULT_MAX_BYTES) -> TruncationResult:
+def truncate_tail(
+    content: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = DEFAULT_MAX_BYTES
+) -> TruncationResult:
     """Truncate output to the last ``max_lines`` or ``max_bytes``, whichever is hit first."""
     total_lines = content.count("\n") + 1 if content else 0
     total_bytes = len(content.encode("utf-8"))
@@ -208,7 +210,9 @@ def truncate_tail(content: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes
     )
 
 
-def truncate_head(content: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = DEFAULT_MAX_BYTES) -> TruncationResult:
+def truncate_head(
+    content: str, *, max_lines: int = DEFAULT_MAX_LINES, max_bytes: int = DEFAULT_MAX_BYTES
+) -> TruncationResult:
     """Truncate output to the first ``max_lines`` or ``max_bytes``, whichever is hit first."""
     total_lines = content.count("\n") + 1 if content else 0
     total_bytes = len(content.encode("utf-8"))
@@ -398,9 +402,7 @@ def _is_bmp(data: bytes) -> bool:
 
 
 def _read_uint16_le(data: bytes, offset: int) -> int:
-    return (data[offset] if offset < len(data) else 0) + (
-        (data[offset + 1] if offset + 1 < len(data) else 0) << 8
-    )
+    return (data[offset] if offset < len(data) else 0) + ((data[offset + 1] if offset + 1 < len(data) else 0) << 8)
 
 
 def _read_uint32_be(data: bytes, offset: int) -> int:
@@ -438,6 +440,15 @@ def _now_ms() -> int:
 
 
 # --- Bash tool ---
+
+
+def _decode_subprocess_output(value: bytes | str | None) -> str:
+    """Normalize a subprocess.TimeoutExpired stdout/stderr value to str."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def create_bash_tool(
@@ -490,7 +501,7 @@ def create_bash_tool(
                 env={**os.environ},
             )
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
+            output = _decode_subprocess_output(exc.stdout) + _decode_subprocess_output(exc.stderr)
             msg = f"Command timed out after {exec_timeout} seconds"
             if output:
                 msg = f"{output}\n\n{msg}"
@@ -521,13 +532,11 @@ def create_bash_tool(
                 )
             elif truncation.truncated_by == "lines":
                 output_text = (
-                    truncation.content
-                    + f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines}.]"
+                    truncation.content + f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines}.]"
                 )
             else:
                 output_text = (
-                    truncation.content
-                    + f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines} "
+                    truncation.content + f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines} "
                     f"({format_size(DEFAULT_MAX_BYTES)} limit).]"
                 )
         elif not output_text:
@@ -592,9 +601,7 @@ def create_read_tool(*, cwd: str | None = None) -> AgentTool:
             import base64
 
             if mime_type == "image/bmp":
-                return text_result(
-                    "Read image file [image/bmp]\n[Image omitted: BMP requires conversion.]"
-                )
+                return text_result("Read image file [image/bmp]\n[Image omitted: BMP requires conversion.]")
             encoded = base64.b64encode(raw_bytes).decode("ascii")
             return AgentToolResult(
                 content=[
@@ -627,8 +634,7 @@ def create_read_tool(*, cwd: str | None = None) -> AgentTool:
         if truncation.last_line_partial:
             first_line_size = format_size(len(all_lines[start_line].encode("utf-8")))
             output_text = (
-                f"[Line {start_line_display} is {first_line_size}, exceeds "
-                f"{format_size(DEFAULT_MAX_BYTES)} limit.]"
+                f"[Line {start_line_display} is {first_line_size}, exceeds {format_size(DEFAULT_MAX_BYTES)} limit.]"
             )
             details = ReadToolDetails(truncation=truncation)
         elif truncation.truncated:
@@ -650,7 +656,9 @@ def create_read_tool(*, cwd: str | None = None) -> AgentTool:
         elif user_limited_lines is not None and start_line + user_limited_lines < total_file_lines:
             remaining = total_file_lines - (start_line + user_limited_lines)
             next_offset = start_line + user_limited_lines + 1
-            output_text = f"{truncation.content}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            output_text = (
+                f"{truncation.content}\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
+            )
         else:
             output_text = truncation.content
 

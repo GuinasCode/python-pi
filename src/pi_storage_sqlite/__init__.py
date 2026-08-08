@@ -152,7 +152,7 @@ class SQLiteSessionRepository:
             "SELECT COALESCE(MAX(seq), -1) + 1 as next_seq FROM session_entries WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        seq = row["next_seq"]
+        seq = int(row["next_seq"])
         self._conn.execute(
             "INSERT INTO session_entries (session_id, seq, parent_seq, data) VALUES (?, ?, ?, ?)",
             (session_id, seq, parent_seq, json.dumps(data)),
@@ -173,14 +173,10 @@ class SQLiteSessionRepository:
     ) -> list[dict[str, Any]]:
         """Get entries for a session."""
         rows = self._conn.execute(
-            "SELECT seq, parent_seq, data FROM session_entries "
-            "WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?",
+            "SELECT seq, parent_seq, data FROM session_entries WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?",
             (session_id, from_seq, limit),
         ).fetchall()
-        return [
-            {"seq": row["seq"], "parent_seq": row["parent_seq"], "data": json.loads(row["data"])}
-            for row in rows
-        ]
+        return [{"seq": row["seq"], "parent_seq": row["parent_seq"], "data": json.loads(row["data"])} for row in rows]
 
     def search(
         self,
@@ -190,10 +186,7 @@ class SQLiteSessionRepository:
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """Search session entries."""
-        sql = (
-            "SELECT session_id, seq, content FROM session_fts "
-            "WHERE content LIKE ?"
-        )
+        sql = "SELECT session_id, seq, content FROM session_fts WHERE content LIKE ?"
         params: list[Any] = [f"%{query}%"]
         if session_id is not None:
             sql += " AND session_id = ?"
@@ -201,10 +194,7 @@ class SQLiteSessionRepository:
         sql += " LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
-        return [
-            {"session_id": row["session_id"], "seq": row["seq"], "content": row["content"]}
-            for row in rows
-        ]
+        return [{"session_id": row["session_id"], "seq": row["seq"], "content": row["content"]} for row in rows]
 
     def close(self) -> None:
         """Close the database connection."""

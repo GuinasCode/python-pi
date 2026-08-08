@@ -199,7 +199,7 @@ class PiServer:
             "models": [],
         }
 
-    def on_event(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[]]:
+    def on_event(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Register an event listener."""
         self._event_listeners.append(listener)
 

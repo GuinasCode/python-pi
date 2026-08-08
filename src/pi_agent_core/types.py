@@ -102,7 +102,7 @@ class AfterToolCallContext:
     assistant_message: AssistantMessage
     tool_call: AgentToolCall
     args: Any
-    result: AgentToolResult[Any]
+    result: AgentToolResult
     is_error: bool
     context: AgentContext
 
@@ -340,6 +340,12 @@ PrepareNextTurnSignalFn: TypeAlias = Callable[
     [Any],
     "AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None]",
 ]
+# Like PrepareNextTurnFn, but also receives the in-flight run's bookkeeping
+# object (an Agent-private _ActiveRun, typed Any here since it isn't public).
+PrepareNextTurnWithContextFn: TypeAlias = Callable[
+    [PrepareNextTurnContext, Any],
+    "AgentLoopTurnUpdate | None | Awaitable[AgentLoopTurnUpdate | None]",
+]
 GetMessagesFn: TypeAlias = Callable[[], Awaitable[list[AgentMessage]]]
 BeforeToolCallFn: TypeAlias = Callable[
     [BeforeToolCallContext, Any],
@@ -356,7 +362,7 @@ class AgentLoopConfig(SimpleStreamOptions):
     """Configuration for the agent loop, extending :class:`SimpleStreamOptions`."""
 
     model: Model = field(default_factory=lambda: _DEFAULT_MODEL)
-    convert_to_llm: ConvertToLlmFn = field(default=lambda: _default_convert_to_llm)
+    convert_to_llm: ConvertToLlmFn = field(default_factory=lambda: _default_convert_to_llm)
     transform_context: TransformContextFn | None = None
     get_api_key: GetApiKeyFn | None = None
     should_stop_after_turn: ShouldStopAfterTurnFn | None = None
@@ -372,7 +378,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     return [m for m in messages if m.role in ("user", "assistant", "toolResult")]
 
 
-_DEFAULT_MODEL = Model(
+_DEFAULT_MODEL: Model = Model(
     id="unknown",
     name="unknown",
     api="unknown",
@@ -416,6 +422,7 @@ __all__ = [
     "PrepareNextTurnContext",
     "PrepareNextTurnFn",
     "PrepareNextTurnSignalFn",
+    "PrepareNextTurnWithContextFn",
     "QueueMode",
     "ShouldStopAfterTurnContext",
     "ShouldStopAfterTurnFn",

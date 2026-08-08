@@ -43,9 +43,7 @@ COMPACTION_SUMMARY_PREFIX = (
 )
 COMPACTION_SUMMARY_SUFFIX = "\n</summary>"
 
-BRANCH_SUMMARY_PREFIX = (
-    "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
-)
+BRANCH_SUMMARY_PREFIX = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n"
 BRANCH_SUMMARY_SUFFIX = "</summary>"
 
 
@@ -125,7 +123,9 @@ def create_branch_summary_message(summary: str, from_id: str, timestamp: str | i
     return BranchSummaryMessage(summary=summary, from_id=from_id, timestamp=ts)
 
 
-def create_compaction_summary_message(summary: str, tokens_before: int, timestamp: str | int) -> CompactionSummaryMessage:
+def create_compaction_summary_message(
+    summary: str, tokens_before: int, timestamp: str | int
+) -> CompactionSummaryMessage:
     """Create a :class:`CompactionSummaryMessage` from a timestamp that may be an ISO string or ms epoch."""
     ts = _to_ms_timestamp(timestamp)
     return CompactionSummaryMessage(summary=summary, tokens_before=tokens_before, timestamp=ts)
@@ -154,13 +154,11 @@ def convert_to_llm(messages: list[Any]) -> list[Message]:
     for m in messages:
         role = getattr(m, "role", None)
         if role in ("user", "assistant", "toolResult"):
-            result.append(m)  # type: ignore[arg-type]
+            result.append(m)
         elif role == "bashExecution":
             if getattr(m, "exclude_from_context", False):
                 continue
-            result.append(
-                UserMessage(content=[TextContent(text=bash_execution_to_text(m))], timestamp=m.timestamp)
-            )
+            result.append(UserMessage(content=[TextContent(text=bash_execution_to_text(m))], timestamp=m.timestamp))
         elif role == "custom":
             content = m.content
             if isinstance(content, str):

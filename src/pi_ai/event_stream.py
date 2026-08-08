@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from pi_ai import AssistantMessage
 
@@ -96,9 +96,9 @@ class AssistantMessageEventStream(EventStream[Any, AssistantMessage]):
 
         def extract_result(event: Any) -> AssistantMessage:
             if getattr(event, "type", "") == "done":
-                return event.message
+                return cast(AssistantMessage, event.message)
             if getattr(event, "type", "") == "error":
-                return event.error
+                return cast(AssistantMessage, event.error)
             raise ValueError("Unexpected event type for final result")
 
         super().__init__(is_complete, extract_result)

@@ -22,6 +22,7 @@ from pi_ai import (
     TextContent,
     ToolResultMessage,
 )
+from pi_ai.event_stream import AssistantMessageEventStream
 
 from .types import (
     AfterToolCallContext,
@@ -175,7 +176,7 @@ async def _run_loop(
                 return
 
             # Check for tool calls
-            tool_calls = [c for c in message.content if getattr(c, "type", None) == "toolCall"]
+            tool_calls = [c for c in message.content if isinstance(c, AgentToolCall)]
 
             tool_results: list[ToolResultMessage] = []
             has_more_tool_calls = False
@@ -294,7 +295,7 @@ async def _stream_assistant_response(
     if not resolved_api_key:
         resolved_api_key = config.api_key
 
-    response = await _maybe_await(stream_function(config.model, llm_context, config))
+    response: AssistantMessageEventStream = await _maybe_await(stream_function(config.model, llm_context, config))
 
     partial_message: AssistantMessage | None = None
     added_partial = False
@@ -302,7 +303,7 @@ async def _stream_assistant_response(
     async for event in response:
         if event.type == "start":
             partial_message = event.partial
-            context.messages.append(partial_message)  # type: ignore[arg-type]
+            context.messages.append(partial_message)
             added_partial = True
             await _emit(emit, MessageStartEvent(message=partial_message))
         elif event.type in (
@@ -387,7 +388,7 @@ async def _execute_tool_calls(
     emit: AgentEventSink,
 ) -> _ExecutedToolBatch:
     """Execute tool calls in parallel or sequentially based on config."""
-    tool_calls = [c for c in assistant_message.content if getattr(c, "type", None) == "toolCall"]
+    tool_calls = [c for c in assistant_message.content if isinstance(c, AgentToolCall)]
     if config.tool_execution == "parallel" and len(tool_calls) > 1:
         return await _execute_tool_calls_parallel(current_context, assistant_message, tool_calls, config, signal, emit)
     return await _execute_tool_calls_sequential(current_context, assistant_message, tool_calls, config, signal, emit)
@@ -437,7 +438,7 @@ async def _execute_tool_calls_parallel(
                 "is_error": True,
             }
         else:
-            finalized = outcome  # type: ignore[assignment]
+            finalized = outcome
 
         await _emit(
             emit,

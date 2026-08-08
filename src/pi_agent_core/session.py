@@ -348,9 +348,8 @@ class SessionForkOptions:
     id: str | None = None
 
 
-SessionForkSelection: TypeAlias = (
-    dict[str, str]  # {"kind": "all"} | {"kind": "through_entry", "entryId": ...} | {"kind": "before_user_message", "entryId": ...}
-)
+SessionForkSelection: TypeAlias = dict[str, str]
+# {"kind": "all"} | {"kind": "through_entry", "entryId": ...} | {"kind": "before_user_message", "entryId": ...}
 
 
 # --- Storage protocol ---
@@ -514,9 +513,7 @@ class ArraySessionIndex:
                 raise SessionError("invalid_session", f"Session branch contains a cycle at {current.id}")
             visited.add(current.id)
             path_from_start.append(current)
-            if query.order != "oldestFirst" and (
-                current.id == query.stop_at_id or current.type == query.stop_at_type
-            ):
+            if query.order != "oldestFirst" and (current.id == query.stop_at_id or current.type == query.stop_at_type):
                 break
             if current.parent_id is None:
                 break
@@ -542,8 +539,7 @@ class ArraySessionIndex:
             for entry in bounded
             if (query.type is None or entry.type == query.type)
             and (
-                query.custom_type is None
-                or (isinstance(entry, CustomEntry) and entry.custom_type == query.custom_type)
+                query.custom_type is None or (isinstance(entry, CustomEntry) and entry.custom_type == query.custom_type)
             )
         ]
 
@@ -896,7 +892,7 @@ class Session:
         await self._storage.append_entry(entry)
 
         # Update leaf_id
-        self._leaf_id = entry.target_id if isinstance(entry, LeafEntry) else entry.id  # type: ignore[union-attr]
+        self._leaf_id = entry.target_id if isinstance(entry, LeafEntry) else entry.id
 
         # Set append_tail for next operation
         new_tail: asyncio.Future[None] = loop.create_future()
@@ -909,13 +905,15 @@ class Session:
         self,
         create_entry: Callable[[dict[str, Any]], SessionTreeEntry],
     ) -> str:
-        entry = await self._enqueue_append(create_entry)
+        entry: SessionTreeEntry = await self._enqueue_append(create_entry)
         return entry.id
 
     async def append_message(self, message: Any) -> str:
         """Append a message entry to the session tree."""
         return await self._append_typed_entry(
-            lambda base: MessageEntry(id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], message=message)
+            lambda base: MessageEntry(
+                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], message=message
+            )
         )
 
     async def append_thinking_level_change(self, thinking_level: str) -> str:
@@ -928,14 +926,20 @@ class Session:
     async def append_model_change(self, provider: str, model_id: str) -> str:
         return await self._append_typed_entry(
             lambda base: ModelChangeEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], provider=provider, model_id=model_id
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                provider=provider,
+                model_id=model_id,
             )
         )
 
     async def append_active_tools_change(self, active_tool_names: list[str]) -> str:
         return await self._append_typed_entry(
             lambda base: ActiveToolsChangeEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
                 active_tool_names=list(active_tool_names),
             )
         )
@@ -952,17 +956,27 @@ class Session:
     ) -> str:
         return await self._append_typed_entry(
             lambda base: CompactionEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
-                summary=summary, first_kept_entry_id=first_kept_entry_id, tokens_before=tokens_before,
-                details=details, from_hook=from_hook, usage=usage, retained_tail=retained_tail,
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                summary=summary,
+                first_kept_entry_id=first_kept_entry_id,
+                tokens_before=tokens_before,
+                details=details,
+                from_hook=from_hook,
+                usage=usage,
+                retained_tail=retained_tail,
             )
         )
 
     async def append_custom_entry(self, custom_type: str, data: Any = None) -> str:
         return await self._append_typed_entry(
             lambda base: CustomEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
-                custom_type=custom_type, data=data,
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                custom_type=custom_type,
+                data=data,
             )
         )
 
@@ -975,8 +989,13 @@ class Session:
     ) -> str:
         return await self._append_typed_entry(
             lambda base: CustomMessageEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
-                custom_type=custom_type, content=content, display=display, details=details,
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                custom_type=custom_type,
+                content=content,
+                display=display,
+                details=details,
             )
         )
 
@@ -985,8 +1004,11 @@ class Session:
             raise SessionError("not_found", f"Entry {target_id} not found")
         return await self._append_typed_entry(
             lambda base: LabelEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
-                target_id=target_id, label=label,
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                target_id=target_id,
+                label=label,
             )
         )
 
@@ -994,7 +1016,10 @@ class Session:
         sanitized = re.sub(r"[\r\n]+", " ", name).strip()
         return await self._append_typed_entry(
             lambda base: SessionInfoEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], name=sanitized,
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
+                name=sanitized,
             )
         )
 
@@ -1009,7 +1034,9 @@ class Session:
 
         # Set leaf
         await self._enqueue_append(
-            lambda base: LeafEntry(id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], target_id=entry_id)
+            lambda base: LeafEntry(
+                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"], target_id=entry_id
+            )
         )
 
         if summary is None:
@@ -1017,7 +1044,9 @@ class Session:
 
         return await self._append_typed_entry(
             lambda base: BranchSummaryEntry(
-                id=base["id"], parent_id=base["parent_id"], timestamp=base["timestamp"],
+                id=base["id"],
+                parent_id=base["parent_id"],
+                timestamp=base["timestamp"],
                 from_id=entry_id or "root",
                 summary=summary["summary"],
                 details=summary.get("details"),
@@ -1159,16 +1188,15 @@ class InMemoryRepository:
 
     async def open(self, metadata: SessionMetadata) -> Session:
         self._assert_open()
-        storage = await self._operations.enqueue(
-            metadata.id, lambda: self._get_state(metadata.id)
-        )
+        storage = await self._operations.enqueue(metadata.id, lambda: self._get_state(metadata.id))
         return await create_session(storage, self._entry_transforms)
 
     async def list(self) -> list[SessionMetadata]:
         self._assert_open()
-        return await self._operations.enqueue_barrier(
+        result: list[SessionMetadata] = await self._operations.enqueue_barrier(
             lambda: [s.metadata for s in self._sessions.values()]
         )
+        return result
 
     async def delete(self, metadata: SessionMetadata) -> None:
         self._assert_open()

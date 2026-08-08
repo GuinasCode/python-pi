@@ -189,7 +189,7 @@ class PiClient:
     def is_disposed(self) -> bool:
         return self._disposed
 
-    def on_event(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[]]:
+    def on_event(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
         """Register an event listener and return an unsubscribe function."""
         self._event_listeners.append(listener)
 

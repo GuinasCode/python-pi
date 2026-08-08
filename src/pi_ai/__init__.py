@@ -6,7 +6,7 @@ mirroring the TypeScript ``packages/ai/src/types.ts``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
@@ -264,7 +264,7 @@ class Tool:
 class Context:
     system_prompt: str | None = None
     messages: list[Message] = field(default_factory=list)
-    tools: list[Tool] | None = None
+    tools: Sequence[Tool] | None = None
 
 
 # --- Stream options ---

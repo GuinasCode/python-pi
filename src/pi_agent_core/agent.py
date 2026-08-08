@@ -45,6 +45,7 @@ from .types import (
     MessageUpdateEvent,
     PrepareNextTurnContext,
     PrepareNextTurnFn,
+    PrepareNextTurnWithContextFn,
     QueueMode,
     StreamFn,
     ThinkingLevel,
@@ -62,6 +63,22 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     return [m for m in messages if m.role in ("user", "assistant", "toolResult")]
 
 
+def _thinking_budgets_to_dict(budgets: ThinkingBudgets | None) -> dict[str, int] | None:
+    """Convert the public ThinkingBudgets dataclass to the wire dict AgentLoopConfig expects."""
+    if budgets is None:
+        return None
+    return {
+        level: value
+        for level, value in (
+            ("minimal", budgets.minimal),
+            ("low", budgets.low),
+            ("medium", budgets.medium),
+            ("high", budgets.high),
+        )
+        if value is not None
+    }
+
+
 @dataclass
 class AgentOptions:
     """Options for constructing an :class:`Agent`."""
@@ -76,7 +93,7 @@ class AgentOptions:
     before_tool_call: BeforeToolCallFn | None = None
     after_tool_call: AfterToolCallFn | None = None
     prepare_next_turn: PrepareNextTurnFn | None = None
-    prepare_next_turn_with_context: PrepareNextTurnFn | None = None
+    prepare_next_turn_with_context: PrepareNextTurnWithContextFn | None = None
     steering_mode: QueueMode = "one-at-a-time"
     follow_up_mode: QueueMode = "one-at-a-time"
     session_id: str | None = None
@@ -192,7 +209,7 @@ class Agent:
         self.before_tool_call: BeforeToolCallFn | None = opts.before_tool_call
         self.after_tool_call: AfterToolCallFn | None = opts.after_tool_call
         self.prepare_next_turn: PrepareNextTurnFn | None = opts.prepare_next_turn
-        self.prepare_next_turn_with_context: PrepareNextTurnFn | None = opts.prepare_next_turn_with_context
+        self.prepare_next_turn_with_context: PrepareNextTurnWithContextFn | None = opts.prepare_next_turn_with_context
         self._steering_queue = _PendingMessageQueue(opts.steering_mode)
         self._follow_up_queue = _PendingMessageQueue(opts.follow_up_mode)
         self.session_id: str | None = opts.session_id
@@ -205,7 +222,7 @@ class Agent:
 
     # --- Subscription ---
 
-    def on_event(self, listener: Callable[[AgentEvent, Any], Awaitable[None] | None]) -> Callable[()]:
+    def on_event(self, listener: Callable[[AgentEvent, Any], Awaitable[None] | None]) -> Callable[[], None]:
         """Register a listener and return an unsubscribe function."""
         self._listeners.append(listener)
         removed = False
@@ -420,10 +437,13 @@ class Agent:
         skip_steering = skip_initial_steering_poll
 
         async def _prepare_next_turn(context: PrepareNextTurnContext) -> AgentLoopTurnUpdate | None:
+            update: AgentLoopTurnUpdate | None
             if self.prepare_next_turn_with_context is not None:
-                return await _maybe_await(self.prepare_next_turn_with_context(context, self._active_run))
+                update = await _maybe_await(self.prepare_next_turn_with_context(context, self._active_run))
+                return update
             if self.prepare_next_turn is not None:
-                return await _maybe_await(self.prepare_next_turn(self._active_run))
+                update = await _maybe_await(self.prepare_next_turn(context))
+                return update
             return None
 
         async def _get_steering_messages() -> list[AgentMessage]:
@@ -443,7 +463,7 @@ class Agent:
             on_payload=self.on_payload,
             on_response=self.on_response,
             transport=self.transport,
-            thinking_budgets=self.thinking_budgets,
+            thinking_budgets=_thinking_budgets_to_dict(self.thinking_budgets),
             max_retry_delay_ms=self.max_retry_delay_ms,
             tool_execution=self.tool_execution,
             before_tool_call=self.before_tool_call,
@@ -459,7 +479,7 @@ class Agent:
         )
         return config
 
-    async def _run_with_lifecycle(self, executor: Callable[[Any], Awaitable[None]]) -> None:
+    async def _run_with_lifecycle(self, executor: Callable[[Any], Awaitable[Any]]) -> None:
         if self._active_run is not None:
             raise RuntimeError("Agent is already processing.")
 
