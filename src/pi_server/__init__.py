@@ -9,13 +9,15 @@ import hmac
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
+
+from pi_protocol import PROTOCOL_VERSION, JsonValue
 
 
 class ServerError(Exception):
     """Base error for pi_server."""
 
-    def __init__(self, code: str, message: str, details: Any = None) -> None:
+    def __init__(self, code: str, message: str, details: dict[str, object] | None = None) -> None:
         self.code = code
         self.details = details
         super().__init__(message)
@@ -158,8 +160,11 @@ class PiServer:
     def __init__(self, options: ServerOptions) -> None:
         self._options = options
         self._sessions = SessionManager()
+        # TODO(pi_server): replace Any with a ConnectionInfo type once the
+        # connection lifecycle (transport, auth state, ...) is modeled —
+        # currently nothing populates or reads this map yet.
         self._connections: dict[str, Any] = {}
-        self._event_listeners: list[Callable[[dict[str, Any]], None]] = []
+        self._event_listeners: list[Callable[[dict[str, JsonValue]], None]] = []
 
     @property
     def server_id(self) -> str:
@@ -175,11 +180,11 @@ class PiServer:
             return True
         return hmac.compare_digest(token, self._options.token)
 
-    def create_snapshot(self) -> dict[str, Any]:
+    def create_snapshot(self) -> dict[str, JsonValue]:
         """Create a server snapshot."""
         return {
             "serverId": self._options.server_id,
-            "protocolVersion": 2,
+            "protocolVersion": PROTOCOL_VERSION,
             "revision": 0,
             "sessions": [
                 {
@@ -189,7 +194,9 @@ class PiServer:
                     "createdAt": s.created_at,
                     "updatedAt": s.updated_at,
                     "phase": s.phase,
-                    "model": s.model,
+                    # dict[str, str] is safe as JsonValue but not a subtype of
+                    # dict[str, JsonValue] under mypy's dict invariance.
+                    "model": cast("dict[str, JsonValue]", s.model),
                     "thinkingLevel": s.thinking_level,
                     "attached": s.attached,
                     "locked": s.locked_by is not None,
@@ -199,7 +206,7 @@ class PiServer:
             "models": [],
         }
 
-    def on_event(self, listener: Callable[[dict[str, Any]], None]) -> Callable[[], None]:
+    def on_event(self, listener: Callable[[dict[str, JsonValue]], None]) -> Callable[[], None]:
         """Register an event listener."""
         self._event_listeners.append(listener)
 
@@ -209,7 +216,7 @@ class PiServer:
 
         return unsubscribe
 
-    def _emit_event(self, event: dict[str, Any]) -> None:
+    def _emit_event(self, event: dict[str, JsonValue]) -> None:
         for listener in list(self._event_listeners):
             listener(event)
 

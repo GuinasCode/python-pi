@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from pi_protocol import PROTOCOL_VERSION
 from pi_server import (
     PiServer,
     ServerOptions,
@@ -102,7 +103,7 @@ class TestPiServer:
         server.sessions.create_session(name="s1")
         snapshot = server.create_snapshot()
         assert snapshot["serverId"] == "test"
-        assert snapshot["protocolVersion"] == 2
+        assert snapshot["protocolVersion"] == PROTOCOL_VERSION
         assert len(snapshot["sessions"]) == 1
         assert snapshot["sessions"][0]["name"] == "s1"
 
