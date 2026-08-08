@@ -15,6 +15,7 @@ from pi_agent_core.types import AgentTool, AgentToolResult
 from pi_ai import (
     AssistantMessage,
     Context,
+    ImageContent,
     Message,
     Model,
     SimpleStreamOptions,
@@ -60,7 +61,9 @@ def _create_tool_result_message(
 ) -> ToolResultMessage:
     """Create a ToolResultMessage from a ToolResult."""
     raw = result.content if result.content else [{"type": "text", "text": ""}]
-    content = [TextContent(text=b.get("text", "")) for b in raw if b.get("type") == "text"]
+    content: list[TextContent | ImageContent] = [
+        TextContent(text=b.get("text", "")) for b in raw if b.get("type") == "text"
+    ]
     if not content:
         content = [TextContent(text="")]
     return ToolResultMessage(
@@ -328,7 +331,7 @@ class AgentSession:
 
             # Execute tool calls — support both AgentTool (async) and builtin (sync).
             for block in assistant_msg.content:
-                if block.type != "toolCall":
+                if not isinstance(block, ToolCall):
                     continue
                 tool_call = block
                 self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
@@ -337,10 +340,13 @@ class AgentSession:
                 self._emit(
                     _ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text, details=details)
                 )
+                tool_content: list[TextContent | ImageContent] = [
+                    TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"
+                ]
                 tool_result_msg = ToolResultMessage(
                     tool_call_id=tool_call.id,
                     tool_name=tool_call.name,
-                    content=[TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"],
+                    content=tool_content,
                     details=details,
                     is_error=is_error,
                     timestamp=int(time.time() * 1000),

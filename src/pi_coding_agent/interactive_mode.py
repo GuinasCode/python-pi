@@ -19,7 +19,17 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
-from pi_ai import AssistantMessage, Message, Model, StopReason, UserMessage
+from pi_ai import (
+    AssistantMessage,
+    Message,
+    Model,
+    StopReason,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResultMessage,
+    UserMessage,
+)
 from pi_ai.models import MutableModels, Provider
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
@@ -104,11 +114,11 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
             from pi_ai.providers.openai import openai_provider
 
             model, stream_fn = openai_provider(api_key=openai_key)
-            provider = Provider(
+            provider: Provider[Any] = Provider(
                 id="openai",
                 name="OpenAI",
                 models=[model],
-                stream_fn=stream_fn,  # type: ignore[arg-type]
+                stream_fn=stream_fn,
             )
             models.set_provider(provider)
             return models, model
@@ -224,9 +234,7 @@ class InteractiveSession:
             if role == "user":
                 msg: Message = UserMessage(content=data.get("content", ""), timestamp=data.get("timestamp", 0))
             elif role == "assistant":
-                from pi_ai import TextContent
-
-                content_blocks = []
+                content_blocks: list[TextContent | ThinkingContent | ToolCall] = []
                 for b in data.get("content", []):
                     if b.get("type") == "text":
                         content_blocks.append(TextContent(text=b.get("text", "")))
@@ -249,31 +257,35 @@ class InteractiveSession:
 
         data: dict[str, Any] = {"role": message.role}
 
-        if message.role == "user":
+        if isinstance(message, UserMessage):
             content = message.content
             if isinstance(content, str):
                 data["content"] = content
             elif isinstance(content, list):
-                data["content"] = [{"type": b.type, "text": b.text} if hasattr(b, "type") else str(b) for b in content]
-        elif message.role == "assistant":
-            data["content"] = [
-                {"type": b.type, "text": b.text}
-                if b.type == "text"
-                else {"type": b.type, "thinking": b.thinking}
-                if b.type == "thinking"
-                else {"type": b.type, "id": b.id, "name": b.name, "arguments": b.arguments}
-                for b in message.content
-            ]
+                data["content"] = [
+                    {"type": b.type, "text": b.text} if isinstance(b, TextContent) else str(b) for b in content
+                ]
+        elif isinstance(message, AssistantMessage):
+
+            def _block_to_dict(b: TextContent | ThinkingContent | ToolCall) -> dict[str, Any]:
+                if isinstance(b, TextContent):
+                    return {"type": b.type, "text": b.text}
+                if isinstance(b, ThinkingContent):
+                    return {"type": b.type, "thinking": b.thinking}
+                return {"type": b.type, "id": b.id, "name": b.name, "arguments": b.arguments}
+
+            data["content"] = [_block_to_dict(b) for b in message.content]
             data["model"] = message.model
             data["stop_reason"] = (
                 message.stop_reason.value if hasattr(message.stop_reason, "value") else str(message.stop_reason)
             )
-        elif message.role == "toolResult":
+        elif isinstance(message, ToolResultMessage):
             data["tool_call_id"] = message.tool_call_id
             data["tool_name"] = message.tool_name
             data["is_error"] = message.is_error
             data["content"] = [
-                {"type": b.type, "text": b.text} if hasattr(b, "text") else {"type": b.type} for b in message.content
+                {"type": b.type, "text": b.text} if isinstance(b, TextContent) else {"type": b.type}
+                for b in message.content
             ]
             if message.details is not None:
                 data["details"] = message.details

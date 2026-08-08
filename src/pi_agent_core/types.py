@@ -163,7 +163,7 @@ class AgentTool(Tool):
     prepare_arguments: Callable[[Any], Any] | None = None
     execute: (
         Callable[
-            [str, Any, Any, AgentToolUpdateCallback],
+            [str, Any, Any, AgentToolUpdateCallback | None],
             Awaitable[AgentToolResult],
         ]
         | None
