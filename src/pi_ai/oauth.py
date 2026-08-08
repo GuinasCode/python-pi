@@ -11,22 +11,23 @@ This mirrors the OAuth provider pattern in the TypeScript Pi agent.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import sys
 import time
 from typing import Any
 
 from pi_ai import (
-    AuthCheck,
-    AuthInteraction,
-    Credential,
+    AssistantMessage,
+    Context,
     Model,
-    Provider,
-    ProviderAuth,
     SimpleStreamOptions,
+    StopReason,
 )
-from pi_ai.event_stream import create_assistant_message_event_stream
-from pi_ai.models import MutableModels
+from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
+from pi_ai.models import AuthCheck, AuthInteraction, Credential, MutableModels, Provider, ProviderAuth
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAICodexAuth:
@@ -38,6 +39,13 @@ class OpenAICodexAuth:
     def __init__(self, code_challenge: str | None = None) -> None:
         self._code_verifier = secrets.token_urlsafe(32)
         self._code_challenge = code_challenge or self._generate_challenge(self._code_verifier)
+        # CSRF nonce for the `state` param — independent of the PKCE verifier,
+        # which is a secret that must never appear in a (loggable) URL.
+        self._state = secrets.token_urlsafe(16)
+
+    @property
+    def code_verifier(self) -> str:
+        return self._code_verifier
 
     def _generate_challenge(self, verifier: str) -> str:
         """Generate PKCE code challenge from verifier."""
@@ -55,7 +63,7 @@ class OpenAICodexAuth:
             "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": " ".join(scopes),
-            "state": self._code_verifier[:8],
+            "state": self._state,
             "code_challenge": self._code_challenge,
             "code_challenge_method": "S256",
         }
@@ -86,6 +94,7 @@ class OpenAICodexAuth:
                 metadata=result,
             )
         except Exception:
+            logger.warning("OpenAI OAuth token exchange failed", exc_info=True)
             return None
 
 
@@ -95,6 +104,16 @@ class OpenAICodexAuthInteraction:
     def __init__(self, redirect_uri: str = "http://localhost:8080/callback") -> None:
         self.redirect_uri = redirect_uri
         self._auth = OpenAICodexAuth()
+
+    @property
+    def code_verifier(self) -> str:
+        return self._auth.code_verifier
+
+    def build_auth_url(self) -> str:
+        return self._auth.build_auth_url(self.redirect_uri)
+
+    def exchange_code(self, code: str) -> Credential | None:
+        return self._auth.exchange_code(code, self._auth.code_verifier, self.redirect_uri)
 
     def open_url(self, url: str) -> None:
         """Print the URL for the user to visit in their browser."""
@@ -140,9 +159,7 @@ class OpenAICodexAuthProvider:
             return None
 
         auth_interaction = OpenAICodexAuthInteraction()
-        interaction.open_url(
-            auth_interaction._auth.build_auth_url(auth_interaction.redirect_uri)
-        )
+        interaction.open_url(auth_interaction.build_auth_url())
 
         if not sys.stdin.isatty():
             raise RuntimeError(
@@ -151,8 +168,7 @@ class OpenAICodexAuthProvider:
             )
         code = input().strip()
 
-        verifier = auth_interaction._auth._code_verifier
-        cred = auth_interaction._auth.exchange_code(code, verifier, auth_interaction.redirect_uri)
+        cred = auth_interaction.exchange_code(code)
         if cred:
             self._credential = cred
         return cred
@@ -190,16 +206,15 @@ def openai_oauth_provider(
         id=model.id,
         api="openai",
         provider="openai-oauth",
-        provider_id="openai",
         context_window=128000,
-        max_output_tokens=16000,
+        max_tokens=16000,
     )
 
-    provider = Provider(
+    provider: Provider[Any] = Provider(
         id="openai-oauth",
         name="OpenAI OAuth (Codex)",
         models=[provider_model],
-        stream_fn=lambda ctx, opts, state: _oauth_stream_fn(ctx, opts, state),
+        stream_fn=lambda m, ctx, opts: _oauth_stream_fn(m, ctx, opts, auth),
         auth=auth,
     )
     models.set_provider(provider)
@@ -207,25 +222,39 @@ def openai_oauth_provider(
     return provider_model, models, auth
 
 
+def _oauth_error_message(text: str) -> AssistantMessage:
+    return AssistantMessage(
+        content=[],
+        api="openai",
+        provider="openai-oauth",
+        model="",
+        stop_reason=StopReason.ERROR,
+        error_message=text,
+        timestamp=int(time.time() * 1000),
+    )
+
+
 async def _oauth_stream_fn(
-    context: Any,
+    model: Model,
+    context: Context,
     options: SimpleStreamOptions | None,
-    state: dict[str, int],
-) -> None:
+    auth: OpenAICodexAuthProvider,
+) -> AssistantMessageEventStream:
     """Stream function using OAuth credentials."""
 
-    from pi_ai import (
-        ErrorEvent,
-    )
+    from pi_ai import ErrorEvent
 
     stream = create_assistant_message_event_stream()
 
-    api_key = state.get("oauth_token")
-    if not api_key:
-        msg = "No OAuth token available. Run auth first."
-        stream.push(ErrorEvent(reason="error", error=msg))
-        stream.end(msg)
-        return
+    credential = auth.resolve()
+    if credential is None:
+        err = _oauth_error_message("No OAuth token available. Run auth first.")
+        stream.push(ErrorEvent(reason="error", error=err))
+        stream.end(err)
+        return stream
 
     # ... rest similar to openai.py streaming ...
-    stream.end("OAuth token placeholder - needs full implementation")
+    err = _oauth_error_message("OAuth token placeholder - needs full implementation")
+    stream.push(ErrorEvent(reason="error", error=err))
+    stream.end(err)
+    return stream
