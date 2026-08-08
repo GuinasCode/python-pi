@@ -29,6 +29,7 @@ from pi_ai import (
     ToolResultMessage,
     Usage,
     UsageCost,
+    UserMessage,
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.models import Provider
@@ -103,7 +104,7 @@ def _content_to_text(content: str | list[TextContent | ImageContent]) -> str:
         return content
     parts: list[str] = []
     for block in content:
-        if block.type == "text":
+        if isinstance(block, TextContent):
             parts.append(block.text)
         else:
             parts.append(f"[image:{block.mime_type}:{len(block.data)}]")
@@ -113,9 +114,9 @@ def _content_to_text(content: str | list[TextContent | ImageContent]) -> str:
 def _assistant_content_to_text(content: list[TextContent | ThinkingContent | ToolCall]) -> str:
     parts: list[str] = []
     for block in content:
-        if block.type == "text":
+        if isinstance(block, TextContent):
             parts.append(block.text)
-        elif block.type == "thinking":
+        elif isinstance(block, ThinkingContent):
             parts.append(block.thinking)
         else:
             parts.append(f"{block.name}:{json.dumps(block.arguments)}")
@@ -125,7 +126,7 @@ def _assistant_content_to_text(content: list[TextContent | ThinkingContent | Too
 def _tool_result_to_text(message: ToolResultMessage) -> str:
     parts = [message.tool_name]
     for block in message.content:
-        if block.type == "text":
+        if isinstance(block, TextContent):
             parts.append(block.text)
         else:
             parts.append(f"[image:{block.mime_type}:{len(block.data)}]")
@@ -133,11 +134,11 @@ def _tool_result_to_text(message: ToolResultMessage) -> str:
 
 
 def _message_to_text(message: Message) -> str:
-    if message.role == "user":
-        return _content_to_text(message.content)  # type: ignore[arg-type]
-    if message.role == "assistant":
+    if isinstance(message, UserMessage):
+        return _content_to_text(message.content)
+    if isinstance(message, AssistantMessage):
         return _assistant_content_to_text(message.content)
-    return _tool_result_to_text(message)  # type: ignore[arg-type]
+    return _tool_result_to_text(message)
 
 
 def _serialize_context(context: Context) -> str:
@@ -265,35 +266,38 @@ async def _stream_with_deltas(
     stream.push(StartEvent(partial=copy.deepcopy(partial)))
 
     for idx, block in enumerate(message.content):
-        if block.type == "thinking":
-            partial.content.append(ThinkingContent(thinking=""))
+        if isinstance(block, ThinkingContent):
+            thinking_partial = ThinkingContent(thinking="")
+            partial.content.append(thinking_partial)
             stream.push(ThinkingStartEvent(content_index=idx, partial=copy.deepcopy(partial)))
             for chunk in _split_by_token_size(block.thinking, min_token_size, max_token_size):
                 if tokens_per_second and tokens_per_second > 0:
                     await asyncio.sleep(_estimate_tokens(chunk) / tokens_per_second)
-                partial.content[idx].thinking += chunk
+                thinking_partial.thinking += chunk
                 stream.push(ThinkingDeltaEvent(content_index=idx, delta=chunk, partial=copy.deepcopy(partial)))
             stream.push(ThinkingEndEvent(content_index=idx, content=block.thinking, partial=copy.deepcopy(partial)))
 
-        elif block.type == "text":
-            partial.content.append(TextContent(text=""))
+        elif isinstance(block, TextContent):
+            text_partial = TextContent(text="")
+            partial.content.append(text_partial)
             stream.push(TextStartEvent(content_index=idx, partial=copy.deepcopy(partial)))
             for chunk in _split_by_token_size(block.text, min_token_size, max_token_size):
                 if tokens_per_second and tokens_per_second > 0:
                     await asyncio.sleep(_estimate_tokens(chunk) / tokens_per_second)
-                partial.content[idx].text += chunk
+                text_partial.text += chunk
                 stream.push(TextDeltaEvent(content_index=idx, delta=chunk, partial=copy.deepcopy(partial)))
             stream.push(TextEndEvent(content_index=idx, content=block.text, partial=copy.deepcopy(partial)))
 
-        elif block.type == "toolCall":
-            partial.content.append(ToolCall(id=block.id, name=block.name, arguments={}))
+        elif isinstance(block, ToolCall):
+            tool_partial = ToolCall(id=block.id, name=block.name, arguments={})
+            partial.content.append(tool_partial)
             stream.push(ToolCallStartEvent(content_index=idx, partial=copy.deepcopy(partial)))
             args_json = json.dumps(block.arguments)
             for chunk in _split_by_token_size(args_json, min_token_size, max_token_size):
                 if tokens_per_second and tokens_per_second > 0:
                     await asyncio.sleep(_estimate_tokens(chunk) / tokens_per_second)
                 stream.push(ToolCallDeltaEvent(content_index=idx, delta=chunk, partial=copy.deepcopy(partial)))
-            partial.content[idx].arguments = block.arguments
+            tool_partial.arguments = block.arguments
             stream.push(ToolCallEndEvent(content_index=idx, tool_call=block, partial=copy.deepcopy(partial)))
 
     if message.stop_reason in (StopReason.ERROR, StopReason.ABORTED):
@@ -315,7 +319,7 @@ class FauxProviderHandle:
 
     def __init__(
         self,
-        provider: Provider,
+        provider: Provider[Any],
         api: str,
         models: list[Model],
         state: dict[str, int],
@@ -449,11 +453,11 @@ def faux_provider(
         _run_task = asyncio.ensure_future(_run())  # noqa: RUF006
         return outer
 
-    provider = Provider(
+    provider: Provider[Any] = Provider(
         id=provider_name,
         name="Faux",
         models=model_list,
-        stream_fn=_stream,  # type: ignore[arg-type]
+        stream_fn=_stream,
     )
 
     def set_responses(responses: list[FauxResponseStep]) -> None:

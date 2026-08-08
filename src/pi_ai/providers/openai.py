@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 try:
@@ -25,10 +25,13 @@ from pi_ai import (
     SimpleStreamOptions,
     StopReason,
     TextContent,
+    ThinkingContent,
     Tool,
     ToolCall,
+    ToolResultMessage,
     Usage,
     UsageCost,
+    UserMessage,
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.utils import describe_exception
@@ -45,9 +48,9 @@ def _content_to_openai(
         return [{"type": "text", "text": content}]
     parts: list[dict[str, Any]] = []
     for block in content:
-        if block.type == "text":
+        if isinstance(block, TextContent):
             parts.append({"type": "text", "text": block.text})
-        elif block.type == "image":
+        elif isinstance(block, ImageContent):
             parts.append(
                 {
                     "type": "image_url",
@@ -61,18 +64,18 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert pi messages to OpenAI chat completion format."""
     result: list[dict[str, Any]] = []
     for msg in messages:
-        if msg.role == "user":
-            result.append({"role": "user", "content": _content_to_openai(msg.content)})  # type: ignore[arg-type]
-        elif msg.role == "assistant":
+        if isinstance(msg, UserMessage):
+            result.append({"role": "user", "content": _content_to_openai(msg.content)})
+        elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
             for block in msg.content:
-                if block.type == "text":
+                if isinstance(block, TextContent):
                     text_parts.append(block.text)
-                elif block.type == "thinking":
+                elif isinstance(block, ThinkingContent):
                     pass  # Thinking is not sent to OpenAI completions API
-                elif block.type == "toolCall":
+                elif isinstance(block, ToolCall):
                     tool_calls.append(
                         {
                             "id": block.id,
@@ -88,22 +91,22 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
             if tool_calls:
                 openai_msg["tool_calls"] = tool_calls
             result.append(openai_msg)
-        elif msg.role == "toolResult":
-            text_parts: list[str] = []
-            for block in msg.content:
-                if block.type == "text":
-                    text_parts.append(block.text)
+        elif isinstance(msg, ToolResultMessage):
+            tool_text_parts: list[str] = []
+            for result_block in msg.content:
+                if isinstance(result_block, TextContent):
+                    tool_text_parts.append(result_block.text)
             result.append(
                 {
                     "role": "tool",
                     "tool_call_id": msg.tool_call_id,
-                    "content": "\n".join(text_parts),
+                    "content": "\n".join(tool_text_parts),
                 }
             )
     return result
 
 
-def _convert_tools(tools: list[Tool]) -> list[dict[str, Any]]:
+def _convert_tools(tools: Sequence[Tool]) -> list[dict[str, Any]]:
     """Convert pi tools to OpenAI function tool format."""
     return [
         {
@@ -236,6 +239,7 @@ def _create_openai_provider(
                 finish_reason = None
                 usage_data: dict[str, Any] | None = None
                 current_text_started = False
+                text_content: TextContent | None = None
 
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
@@ -259,12 +263,14 @@ def _create_openai_provider(
 
                     if delta.get("content"):
                         if not current_text_started:
-                            partial.content.append(TextContent(text=""))
+                            text_content = TextContent(text="")
+                            partial.content.append(text_content)
                             stream.push(TextStartEvent(content_index=content_index, partial=partial))
                             current_text_started = True
                         text_chunk = delta["content"]
                         text_buffer += text_chunk
-                        partial.content[content_index].text += text_chunk
+                        assert text_content is not None
+                        text_content.text += text_chunk
                         stream.push(TextDeltaEvent(content_index=content_index, delta=text_chunk, partial=partial))
 
                     if delta.get("tool_calls"):

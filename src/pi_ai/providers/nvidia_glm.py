@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any
+from typing import Any, Literal, cast
 
 try:
     import httpx
@@ -36,6 +36,8 @@ from pi_ai import (
     TextEndEvent,
     ToolCall,
     ToolCallEndEvent,
+    ToolResultMessage,
+    UserMessage,
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
@@ -78,11 +80,11 @@ def nvidia_glm_provider(
     ) -> Any:
         return _create_stream(key, ctx, options)
 
-    provider = Provider(
+    provider: Provider[Any] = Provider(
         id="nvidia",
         name="NVIDIA GLM 5.2",
         models=[glm_model],
-        stream_fn=stream_fn,  # type: ignore[arg-type]
+        stream_fn=stream_fn,
     )
     models.set_provider(provider)
 
@@ -122,21 +124,21 @@ def _create_stream(
 
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
-        if msg.role == "user":
+        if isinstance(msg, UserMessage):
             content = (
                 msg.content
                 if isinstance(msg.content, str)
                 else "".join(c.text if hasattr(c, "text") else "" for c in msg.content)
             )
             messages.append({"role": "user", "content": content})
-        elif msg.role == "assistant":
+        elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
             tool_calls_out: list[dict[str, Any]] = []
             for block in msg.content:
-                if block.type == "text":
+                if isinstance(block, TextContent):
                     text_parts.append(block.text)
-                elif block.type == "toolCall":
+                elif isinstance(block, ToolCall):
                     tool_calls_out.append(
                         {
                             "id": block.id,
@@ -152,11 +154,11 @@ def _create_stream(
             if tool_calls_out:
                 openai_msg["tool_calls"] = tool_calls_out
             messages.append(openai_msg)
-        elif msg.role == "toolResult":
+        elif isinstance(msg, ToolResultMessage):
             text_parts_tr: list[str] = []
-            for block in msg.content:
-                if block.type == "text":
-                    text_parts_tr.append(block.text)
+            for result_block in msg.content:
+                if isinstance(result_block, TextContent):
+                    text_parts_tr.append(result_block.text)
             messages.append(
                 {
                     "role": "tool",
@@ -295,7 +297,8 @@ def _create_stream(
                 else:
                     partial.stop_reason = StopReason.STOP
 
-                stream.push(DoneEvent(reason=finish_reason or "stop", message=partial))
+                done_reason = cast('Literal["stop", "length", "toolUse"]', partial.stop_reason.value)
+                stream.push(DoneEvent(reason=done_reason, message=partial))
                 stream.end(partial)
                 done_pushed = True
 
