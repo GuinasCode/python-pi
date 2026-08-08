@@ -1,0 +1,111 @@
+"""Tests for the NVIDIA Moonshot (Kimi K2.6) provider streaming logic.
+
+Uses httpx.MockTransport to simulate the NVIDIA SSE response without a real
+network call, so the accumulation of text/tool-call deltas into a final
+AssistantMessage can be verified directly.
+"""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from pi_ai import Context, Model, StopReason, TextContent, ToolCall, UserMessage
+from pi_ai.providers.nvidia_moonshot import nvidia_moonshot_provider
+
+
+def _sse(*chunks: dict[str, object]) -> bytes:
+    lines = [f"data: {json.dumps(c)}\n\n" for c in chunks]
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
+
+
+@pytest.mark.asyncio
+async def test_text_response_accumulates_and_ends_with_message() -> None:
+    body = _sse(
+        {"choices": [{"delta": {"content": "Hello"}}]},
+        {"choices": [{"delta": {"content": ", world"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    model, models, _meta = nvidia_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+
+    import pi_ai.providers.nvidia_moonshot as mod
+
+    original_client = httpx.AsyncClient
+    mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+    try:
+        stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
+        result = await stream.result()
+    finally:
+        mod.httpx.AsyncClient = original_client
+
+    assert result.stop_reason == StopReason.STOP
+    assert len(result.content) == 1
+    assert isinstance(result.content[0], TextContent)
+    assert result.content[0].text == "Hello, world"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_response_does_not_crash_and_parses_arguments() -> None:
+    body = _sse(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "read_file", "arguments": ""}}]
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"path": "a.py"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    model, models, _meta = nvidia_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+
+    import pi_ai.providers.nvidia_moonshot as mod
+
+    original_client = httpx.AsyncClient
+    mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+    try:
+        stream = models.stream(model, Context(messages=[UserMessage(content="read a.py")]))
+        result = await stream.result()
+    finally:
+        mod.httpx.AsyncClient = original_client
+
+    assert result.stop_reason == StopReason.TOOL_USE
+    assert len(result.content) == 1
+    call = result.content[0]
+    assert isinstance(call, ToolCall)
+    assert call.name == "read_file"
+    assert call.arguments == {"path": "a.py"}
+
+
+@pytest.mark.asyncio
+async def test_api_error_produces_error_message_not_crash() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"internal error")
+
+    model, models, _meta = nvidia_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+
+    import pi_ai.providers.nvidia_moonshot as mod
+
+    original_client = httpx.AsyncClient
+    mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+    try:
+        stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
+        result = await stream.result()
+    finally:
+        mod.httpx.AsyncClient = original_client
+
+    assert result.stop_reason == StopReason.ERROR
+    assert result.error_message and "500" in result.error_message
