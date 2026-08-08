@@ -1,7 +1,13 @@
 """Print mode for non-interactive Pi usage.
 
 Mirrors packages/coding-agent/src/modes/print-mode.ts.
-Connects to the agent loop with faux or real LLM providers.
+Runs a prompt through the full agent loop (:class:`AgentSession`) — same
+tool-calling machinery as interactive mode — so a single ``pi --print``
+invocation can actually read/grep/ls/bash, not just produce a bare LLM
+completion. This matters most for the ``subagent`` tool, which spawns a
+child ``pi --print`` process per subagent: without a real tool loop here,
+a subagent asked to "read every file in X" has no way to do so and
+fabricates a plausible-sounding answer instead.
 """
 
 from __future__ import annotations
@@ -10,12 +16,12 @@ import asyncio
 import json
 import os
 import sys
-import time
 from typing import Any
 
-from pi_ai import Context, Model, UserMessage
+from pi_ai import Model, StopReason
 from pi_ai.models import MutableModels
 from pi_coding_agent import Args
+from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions, get_builtin_tools
 
 
 async def run_print_mode(args: Args) -> int:
@@ -76,8 +82,50 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
     return models, handle.get_model()
 
 
+def _resolve_tools(args: Args) -> tuple[list[Any] | None, bool]:
+    """Resolve the tool list and whether subagent auto-wiring should apply.
+
+    Returns ``(tools, enable_subagents)``. When the caller passed an
+    explicit ``--tools``/``--exclude-tools``/``--no-tools`` restriction
+    (as ``run_subagent`` does, from an agent definition's ``tools:``
+    frontmatter), that restriction is authoritative — the subagent tool
+    is not silently re-added on top of it.
+    """
+    if args.no_tools or args.no_builtin_tools:
+        return [], False
+
+    restricted = bool(args.tools) or bool(args.exclude_tools)
+    tools = get_builtin_tools()
+    if args.tools:
+        allowed = set(args.tools)
+        tools = [t for t in tools if t.name in allowed]
+    if args.exclude_tools:
+        excluded = set(args.exclude_tools)
+        tools = [t for t in tools if t.name not in excluded]
+
+    return tools, not restricted
+
+
+def _build_session(models: MutableModels, model: Any, args: Args) -> AgentSession:
+    tools, enable_subagents = _resolve_tools(args)
+    append_system_prompt = "\n\n".join(args.append_system_prompt) if args.append_system_prompt else None
+    return AgentSession(
+        AgentSessionOptions(
+            models=models,
+            model=model,
+            cwd=os.getcwd(),
+            system_prompt=args.system_prompt,
+            append_system_prompt=append_system_prompt,
+            tools=tools,
+            enable_subagents=enable_subagents,
+            temperature=args.temperature,
+            interactive=False,
+        )
+    )
+
+
 async def _run_text_mode(args: Args, prompt: str) -> int:
-    """Run in text print mode: send prompt to LLM and print response."""
+    """Run in text print mode: run the agent loop and print the result."""
     print(f"[pi] {prompt}", file=sys.stderr)
 
     models, model = _setup_models(args)
@@ -85,29 +133,31 @@ async def _run_text_mode(args: Args, prompt: str) -> int:
         print("Error: No model available", file=sys.stderr)
         return 1
 
-    context = Context(
-        system_prompt=args.system_prompt or "You are a helpful coding assistant.",
-        messages=[UserMessage(content=prompt, timestamp=int(time.time() * 1000))],
-    )
+    session = _build_session(models, model, args)
 
-    stream = models.stream(model, context)
+    printed_any = False
 
-    output_text = ""
-    async for event in stream:
+    def _on_event(event: Any) -> None:
+        nonlocal printed_any
         event_type = getattr(event, "type", "")
         if event_type == "text_delta":
             delta = getattr(event, "delta", "")
             print(delta, end="", flush=True)
-            output_text += delta
-        elif event_type == "done":
-            if output_text:
-                print()  # newline after streaming output
-        elif event_type == "error":
-            msg = getattr(event, "error", None)
-            if msg and hasattr(msg, "error_message") and msg.error_message:
-                print(f"\nError: {msg.error_message}", file=sys.stderr)
-            return 1
+            printed_any = True
+        elif event_type == "tool_call_start":
+            print(f"\n[pi] tool: {getattr(event, 'name', '')}", file=sys.stderr)
+        elif event_type == "tool_call_end" and getattr(event, "is_error", False):
+            print(f"[pi] tool error: {getattr(event, 'result_text', '')}", file=sys.stderr)
 
+    session.on_event(_on_event)
+    result = await session.prompt(prompt)
+
+    if printed_any:
+        print()
+
+    if result.stop_reason == StopReason.ERROR:
+        print(f"\nError: {result.error_message or 'Unknown error'}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -118,14 +168,9 @@ async def _run_json_mode(args: Args, prompt: str) -> int:
         print(json.dumps({"type": "error", "message": "No model available"}))
         return 1
 
-    context = Context(
-        system_prompt=args.system_prompt or "You are a helpful coding assistant.",
-        messages=[UserMessage(content=prompt, timestamp=int(time.time() * 1000))],
-    )
+    session = _build_session(models, model, args)
 
-    stream = models.stream(model, context)
-
-    async for event in stream:
+    def _on_event(event: Any) -> None:
         event_type = getattr(event, "type", "")
         if event_type == "start":
             print(json.dumps({"type": "start"}))
@@ -133,29 +178,27 @@ async def _run_json_mode(args: Args, prompt: str) -> int:
             print(json.dumps({"type": "text_delta", "delta": getattr(event, "delta", "")}))
         elif event_type == "text_end":
             print(json.dumps({"type": "text_end", "content": getattr(event, "content", "")}))
-        elif event_type == "done":
-            msg = getattr(event, "message", None)
+        elif event_type == "tool_call_start":
+            print(json.dumps({"type": "tool_call_start", "name": getattr(event, "name", "")}))
+        elif event_type == "tool_call_end":
             print(
                 json.dumps(
                     {
-                        "type": "done",
-                        "stop_reason": getattr(msg, "stop_reason", "stop"),
+                        "type": "tool_call_end",
+                        "name": getattr(event, "name", ""),
+                        "is_error": getattr(event, "is_error", False),
                     }
                 )
             )
-            return 0
-        elif event_type == "error":
-            msg = getattr(event, "error", None)
-            print(
-                json.dumps(
-                    {
-                        "type": "error",
-                        "message": getattr(msg, "error_message", "Unknown error"),
-                    }
-                )
-            )
-            return 1
 
+    session.on_event(_on_event)
+    result = await session.prompt(prompt)
+
+    if result.stop_reason == StopReason.ERROR:
+        print(json.dumps({"type": "error", "message": result.error_message or "Unknown error"}))
+        return 1
+
+    print(json.dumps({"type": "done", "stop_reason": result.stop_reason.value}))
     return 0
 
 

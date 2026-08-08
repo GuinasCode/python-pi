@@ -17,6 +17,7 @@ from pi_ai import (
     Context,
     Message,
     Model,
+    SimpleStreamOptions,
     StopReason,
     TextContent,
     Tool,
@@ -72,7 +73,7 @@ def _create_tool_result_message(
     )
 
 
-def _get_builtin_tools() -> list[Tool]:
+def get_builtin_tools() -> list[Tool]:
     """Get the built-in tool definitions."""
     return [
         Tool(
@@ -208,9 +209,13 @@ class AgentSessionOptions:
     # Can include AgentTool instances alongside plain Tool schemas.
     tools: list[Tool] | None = None
     thinking_level: str = "off"
+    temperature: float | None = None
     max_turns: int = 50
     # When True, the subagent tool is automatically added to builtin tools.
     enable_subagents: bool = True
+    # Whether a human can be asked a follow-up question and reply in a later
+    # turn (True for interactive mode, False for print/subagent runs).
+    interactive: bool = True
 
 
 class AgentSession:
@@ -225,12 +230,14 @@ class AgentSession:
         self._context_files = options.context_files or []
         self._skills = options.skills or []
         self._thinking_level = options.thinking_level
+        self._temperature = options.temperature
         self._max_turns = options.max_turns
+        self._interactive = options.interactive
         self._messages: list[Message] = []
         self._event_listeners: list[Callable[[Any], None]] = []
         self._text_buffer = ""
 
-        base_tools: list[Tool] = options.tools if options.tools is not None else _get_builtin_tools()
+        base_tools: list[Tool] = options.tools if options.tools is not None else get_builtin_tools()
         if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
             try:
                 from pi_coding_agent.subagent.tool import create_subagent_tool
@@ -238,17 +245,20 @@ class AgentSession:
                 def _on_subagent_progress(line: str) -> None:
                     self._emit(_SubagentProgressEvent(text=line))
 
-                base_tools = [*base_tools, create_subagent_tool(
-                    cwd=self._cwd,
-                    config_dir=None,
-                    on_progress=_on_subagent_progress,
-                )]
+                base_tools = [
+                    *base_tools,
+                    create_subagent_tool(
+                        cwd=self._cwd,
+                        config_dir=None,
+                        on_progress=_on_subagent_progress,
+                    ),
+                ]
             except Exception:
                 pass
 
         self._tools = base_tools
 
-    def on_event(self, listener: Callable[[Any], None]) -> Callable[[]]:
+    def on_event(self, listener: Callable[[Any], None]) -> Callable[[], None]:
         """Register an event listener."""
         self._event_listeners.append(listener)
 
@@ -270,13 +280,16 @@ class AgentSession:
                 prompt += f"\n\n{self._append_system_prompt}"
             prompt += f"\nCurrent working directory: {self._cwd}"
             return prompt
-        return build_system_prompt(BuildSystemPromptOptions(
-            cwd=self._cwd,
-            append_system_prompt=self._append_system_prompt,
-            context_files=self._context_files,
-            skills=self._skills,
-            selected_tools=[t.name for t in self._tools],
-        ))
+        return build_system_prompt(
+            BuildSystemPromptOptions(
+                cwd=self._cwd,
+                append_system_prompt=self._append_system_prompt,
+                context_files=self._context_files,
+                skills=self._skills,
+                selected_tools=[t.name for t in self._tools],
+                interactive=self._interactive,
+            )
+        )
 
     async def prompt(self, text: str) -> AssistantMessage:
         """Send a prompt to the model and run the agent loop until completion."""
@@ -292,7 +305,10 @@ class AgentSession:
                 tools=self._tools,
             )
 
-            stream = self._models.stream(self._model, context)
+            stream_options = (
+                SimpleStreamOptions(temperature=self._temperature) if self._temperature is not None else None
+            )
+            stream = self._models.stream(self._model, context, stream_options)
             assistant_msg = await self._consume_stream(stream)
 
             if assistant_msg is None:
@@ -319,9 +335,7 @@ class AgentSession:
                 result, is_error, details = await self._execute_tool_call(tool_call)
                 result_text = result[0].get("text", "") if result else ""
                 self._emit(
-                    _ToolCallEndEvent(
-                        name=tool_call.name, is_error=is_error, result_text=result_text, details=details
-                    )
+                    _ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text, details=details)
                 )
                 tool_result_msg = ToolResultMessage(
                     tool_call_id=tool_call.id,
@@ -357,14 +371,8 @@ class AgentSession:
                 continue
             if isinstance(tool, AgentTool) and tool.execute is not None:
                 try:
-                    agent_result: AgentToolResult = await tool.execute(
-                        tool_call.id, tool_call.arguments, None, None
-                    )
-                    content = [
-                        {"type": "text", "text": b.text}
-                        for b in agent_result.content
-                        if hasattr(b, "text")
-                    ]
+                    agent_result: AgentToolResult = await tool.execute(tool_call.id, tool_call.arguments, None, None)
+                    content = [{"type": "text", "text": b.text} for b in agent_result.content if hasattr(b, "text")]
                     return content or [{"type": "text", "text": ""}], False, None
                 except Exception as exc:
                     return [{"type": "text", "text": str(exc)}], True, None
@@ -424,13 +432,15 @@ def create_agent_session(
     """Create an AgentSession with resources loaded from config_dir and cwd."""
     resources = load_resources(cwd, config_dir) if config_dir else LoadedResources()
 
-    return AgentSession(AgentSessionOptions(
-        models=models,
-        model=model,
-        cwd=cwd,
-        system_prompt=resources.system_prompt,
-        append_system_prompt=resources.append_system_prompt,
-        context_files=[{"path": f.path, "content": f.content} for f in resources.context_files],
-        skills=resources.skills,
-        thinking_level=thinking_level,
-    ))
+    return AgentSession(
+        AgentSessionOptions(
+            models=models,
+            model=model,
+            cwd=cwd,
+            system_prompt=resources.system_prompt,
+            append_system_prompt=resources.append_system_prompt,
+            context_files=[{"path": f.path, "content": f.content} for f in resources.context_files],
+            skills=resources.skills,
+            thinking_level=thinking_level,
+        )
+    )

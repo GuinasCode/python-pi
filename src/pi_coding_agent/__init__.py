@@ -29,6 +29,7 @@ class Args:
     provider: str | None = None
     model: str | None = None
     api_key: str | None = None
+    temperature: float | None = None
     system_prompt: str | None = None
     append_system_prompt: list[str] | None = None
     thinking: str | None = None
@@ -99,6 +100,12 @@ def parse_args(args: Sequence[str]) -> Args:
         elif arg == "--api-key" and i + 1 < len(args):
             i += 1
             result.api_key = args[i]
+        elif arg == "--temperature" and i + 1 < len(args):
+            i += 1
+            try:
+                result.temperature = float(args[i])
+            except ValueError:
+                result.diagnostics.append({"type": "error", "message": f'Invalid --temperature value "{args[i]}"'})
         elif arg == "--system-prompt" and i + 1 < len(args):
             i += 1
             result.system_prompt = args[i]
@@ -249,6 +256,7 @@ Options:
       --provider NAME     LLM provider
       --model NAME        Model name
       --api-key KEY       API key
+      --temperature N     Sampling temperature (provider default if unset)
       --system-prompt P   Override system prompt
       --thinking LEVEL    Thinking level: {", ".join(VALID_THINKING_LEVELS)}
   -n, --name NAME         Session name
@@ -288,6 +296,14 @@ Arguments:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entry point."""
+    # Windows consoles default stdout/stderr to the active codepage (often
+    # cp1252), which raises UnicodeEncodeError on any character outside it
+    # (e.g. model output containing "warning" or box-drawing symbols).
+    # Force UTF-8 so streamed model output never crashes the process.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     from dotenv import load_dotenv
 
     # Load NVAPI_KEY / OPENAI_API_KEY / etc. from a .env file in the cwd (or
