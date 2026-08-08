@@ -11,6 +11,7 @@ Format::
     description: Fast codebase recon
     tools: read, grep, find, ls, bash
     model: nvidia/glm-5.2
+    temperature: 0.2
     ---
     System prompt goes here...
 
@@ -33,6 +34,7 @@ class AgentDef:
     description: str = ""
     tools: list[str] = field(default_factory=list)
     model: str | None = None
+    temperature: float | None = None
     system_prompt: str = ""
     source_path: str = ""
     trust_level: str = "user"  # "user" | "project"
@@ -56,7 +58,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         return {}, text
 
     fm_text = "".join(lines[1:end])
-    body = "".join(lines[end + 1:])
+    body = "".join(lines[end + 1 :])
 
     try:
         meta = yaml.safe_load(fm_text) or {}
@@ -83,11 +85,15 @@ def _load_from_file(path: Path, trust_level: str) -> AgentDef | None:
     else:
         tools = []
 
+    raw_temperature = meta.get("temperature")
+    temperature = float(raw_temperature) if raw_temperature is not None else None
+
     return AgentDef(
         name=str(name),
         description=str(meta.get("description", "")),
         tools=tools,
         model=meta.get("model"),
+        temperature=temperature,
         system_prompt=body,
         source_path=str(path),
         trust_level=trust_level,

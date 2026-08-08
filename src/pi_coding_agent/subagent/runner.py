@@ -50,7 +50,8 @@ async def run_subagent(
     """
     args: list[str] = [
         sys.executable,
-        "-m", "pi_coding_agent.cli",
+        "-m",
+        "pi_coding_agent.cli",
         "--print",
         "--no-session",
     ]
@@ -63,6 +64,9 @@ async def run_subagent(
 
     if agent.model:
         args += ["--model", agent.model]
+
+    if agent.temperature is not None:
+        args += ["--temperature", str(agent.temperature)]
 
     args.append(task)
 
