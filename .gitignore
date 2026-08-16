@@ -16,3 +16,11 @@ build/
 
 # Local scratch/lint-run output (not part of the codebase)
 *_out.txt
+
+# Persistent memory store — per-user data, created automatically at runtime.
+# Default location is ~/.pi/memory.db (outside the repo); this only guards
+# against a project-local override (e.g. PI_AGENT_DIR pointed at the repo).
+memory.db
+memory.db-journal
+memory.db-wal
+memory.db-shm

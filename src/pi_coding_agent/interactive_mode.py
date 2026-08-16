@@ -39,6 +39,7 @@ from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
 from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW
+from pi_memory import MemoryStore
 
 _console = Console(highlight=False, soft_wrap=True)
 _err_console = Console(highlight=False, soft_wrap=True, stderr=True)
@@ -196,6 +197,18 @@ class InteractiveSession:
 
         resources = load_resources(cwd, self._config_dir)
 
+        memory_store: MemoryStore | None = None
+        memory_top_k = 3
+        try:
+            from pi_coding_agent.settings_manager import SettingsManager
+
+            settings_mgr = SettingsManager.create(cwd=cwd, agent_dir=self._config_dir)
+            if settings_mgr.get_memory_enabled():
+                memory_store = MemoryStore(settings_mgr.get_memory_db_path())
+                memory_top_k = settings_mgr.get_memory_top_k()
+        except Exception:
+            memory_store = None
+
         self._agent_session = AgentSession(
             AgentSessionOptions(
                 models=models,
@@ -205,6 +218,8 @@ class InteractiveSession:
                 append_system_prompt=resources.append_system_prompt,
                 context_files=[{"path": f.path, "content": f.content} for f in resources.context_files],
                 skills=resources.skills,
+                memory_store=memory_store,
+                memory_top_k=memory_top_k,
             )
         )
 
@@ -374,6 +389,11 @@ class InteractiveSession:
                 preview = _fmt_result_preview(result_text)
                 if preview:
                     _console.print(preview)
+
+        # ── one-time local memory embedding model download ──────────────
+        elif t == "memory_download":
+            message = getattr(event, "message", "")
+            _console.print(f"[{DIM_STYLE}]{escape(message)}[/{DIM_STYLE}]")
 
         # ── done: flush any remaining text (stream ended without text_end)
         elif t == "done":

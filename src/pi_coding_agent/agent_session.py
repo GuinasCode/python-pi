@@ -6,6 +6,7 @@ Orchestrates: resolve model → build system prompt → run agent → handle too
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from pi_ai.models import MutableModels
 from pi_coding_agent.resource_loader import LoadedResources, load_resources
 from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system_prompt
 from pi_coding_agent.tools import ToolResult, edit_file, execute_bash, grep_search, list_files, read_file, write_file
+from pi_memory import MemoryStore, create_memory_tools
 
 
 @dataclass
@@ -46,6 +48,12 @@ class _ToolCallEndEvent:
     is_error: bool = False
     result_text: str = ""
     details: Any = None
+
+
+@dataclass
+class _MemoryDownloadEvent:
+    type: str = "memory_download"
+    message: str = ""
 
 
 @dataclass
@@ -219,6 +227,11 @@ class AgentSessionOptions:
     # Whether a human can be asked a follow-up question and reply in a later
     # turn (True for interactive mode, False for print/subagent runs).
     interactive: bool = True
+    # Persistent memory store. When set, remember/recall tools are added and
+    # the top matching memories are recalled and injected into the system
+    # prompt at the start of every prompt() call.
+    memory_store: MemoryStore | None = None
+    memory_top_k: int = 3
 
 
 class AgentSession:
@@ -239,8 +252,16 @@ class AgentSession:
         self._messages: list[Message] = []
         self._event_listeners: list[Callable[[Any], None]] = []
         self._text_buffer = ""
+        self._memory_store = options.memory_store
+        self._memory_top_k = options.memory_top_k
+        if self._memory_store is not None:
+            self._memory_store.embeddings.set_progress_callback(
+                lambda message: self._emit(_MemoryDownloadEvent(message=message))
+            )
 
         base_tools: list[Tool] = options.tools if options.tools is not None else get_builtin_tools()
+        if self._memory_store is not None and not any(t.name == "remember" for t in base_tools):
+            base_tools = [*base_tools, *create_memory_tools(self._memory_store)]
         if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
             try:
                 from pi_coding_agent.subagent.tool import create_subagent_tool
@@ -275,7 +296,7 @@ class AgentSession:
         for listener in list(self._event_listeners):
             listener(event)
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, memories: list[str] | None = None) -> str:
         """Build the system prompt from options."""
         if self._system_prompt:
             prompt = self._system_prompt
@@ -291,12 +312,30 @@ class AgentSession:
                 skills=self._skills,
                 selected_tools=[t.name for t in self._tools],
                 interactive=self._interactive,
+                memories=memories,
+                memory_enabled=self._memory_store is not None,
             )
         )
 
+    async def _recall_memories(self, text: str) -> list[str]:
+        """Fetch the top matching memories for this turn, never raising."""
+        store = self._memory_store
+        if store is None:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            records = await loop.run_in_executor(
+                None,
+                lambda: store.search(text, top_k=self._memory_top_k, project_cwd=self._cwd),
+            )
+        except Exception:
+            return []
+        return [f"[{r.type.value}] {r.title}: {r.content}" for r in records]
+
     async def prompt(self, text: str) -> AssistantMessage:
         """Send a prompt to the model and run the agent loop until completion."""
-        system_prompt = self._build_system_prompt()
+        memories = await self._recall_memories(text)
+        system_prompt = self._build_system_prompt(memories)
         user_msg = UserMessage(content=text, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 
@@ -383,8 +422,11 @@ class AgentSession:
                 except Exception as exc:
                     return [{"type": "text", "text": str(exc)}], True, None
 
-        # Built-in synchronous tools
-        sync_result = _execute_tool(tool_call.name, tool_call.arguments)
+        # Built-in tools: run off the event loop since execute_bash/read_file/etc.
+        # call blocking subprocess/filesystem APIs and would otherwise stall
+        # every other coroutine (streaming, input handling) for the duration.
+        loop = asyncio.get_running_loop()
+        sync_result = await loop.run_in_executor(None, _execute_tool, tool_call.name, tool_call.arguments)
         return sync_result.content, sync_result.is_error, sync_result.details
 
     def _compact_context_if_needed(self, max_messages: int = 40) -> None:

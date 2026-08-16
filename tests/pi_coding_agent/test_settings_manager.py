@@ -230,24 +230,28 @@ class TestSettingsManagerInMemory:
         sm.reload()
         assert sm.get_compaction_enabled() is False
 
-    def test_retry_settings(self) -> None:
-        sm = SettingsManager.in_memory({"retry": {"enabled": False, "maxRetries": 5}})
-        assert sm.get_retry_enabled() is False
-        settings = sm.get_retry_settings()
-        assert settings["maxRetries"] == 5
-        assert settings["baseDelayMs"] == 2000
-
-    def test_provider_retry_settings(self) -> None:
-        sm = SettingsManager.in_memory({"retry": {"provider": {"timeoutMs": 30000, "maxRetryDelayMs": 10000}}})
-        settings = sm.get_provider_retry_settings()
-        assert settings["timeoutMs"] == 30000
-        assert settings["maxRetryDelayMs"] == 10000
-
-    def test_provider_retry_defaults(self) -> None:
+    def test_memory_settings_defaults(self) -> None:
         sm = SettingsManager.in_memory()
-        settings = sm.get_provider_retry_settings()
-        assert settings["maxRetryDelayMs"] == 60000
-        assert settings["timeoutMs"] is None
+        assert sm.get_memory_enabled() is True
+        assert sm.get_memory_top_k() == 3
+        assert sm.get_memory_auto_capture() is True
+        assert sm.get_memory_db_path().endswith("memory.db")
+
+    def test_memory_settings_overrides(self) -> None:
+        sm = SettingsManager.in_memory({"memory": {"enabled": False, "topK": 5, "dbPath": "/tmp/m.db"}})
+        assert sm.get_memory_enabled() is False
+        assert sm.get_memory_top_k() == 5
+        assert sm.get_memory_db_path() == "/tmp/m.db"
+        settings = sm.get_memory_settings()
+        assert settings["enabled"] is False
+        assert settings["topK"] == 5
+
+    def test_set_memory_enabled(self) -> None:
+        sm = SettingsManager.in_memory()
+        sm.set_memory_enabled(False)
+        assert sm.get_memory_enabled() is False
+        sm.reload()
+        assert sm.get_memory_enabled() is False
 
     def test_skill_paths(self) -> None:
         sm = SettingsManager.in_memory({"skills": ["/path/to/skills"]})

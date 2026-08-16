@@ -60,25 +60,6 @@ class BranchSummarySettings:
 
 
 @dataclass
-class ProviderRetrySettings:
-    """Provider-level retry configuration."""
-
-    timeout_ms: int | None = None
-    max_retries: int | None = None
-    max_retry_delay_ms: int | None = None
-
-
-@dataclass
-class RetrySettings:
-    """Top-level retry configuration."""
-
-    enabled: bool | None = None
-    max_retries: int | None = None
-    base_delay_ms: int | None = None
-    provider: ProviderRetrySettings | None = None
-
-
-@dataclass
 class TerminalSettings:
     """Terminal display configuration."""
 
@@ -750,6 +731,40 @@ class SettingsManager:
             "keepRecentTokens": self.get_compaction_keep_recent_tokens(),
         }
 
+    def get_memory_enabled(self) -> bool:
+        memory = self._settings.get("memory")
+        return memory.get("enabled", True) if isinstance(memory, dict) else True
+
+    def set_memory_enabled(self, enabled: bool) -> None:
+        memory = self._global_settings.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        memory["enabled"] = enabled
+        self._global_settings.set("memory", memory)
+        self._mark_modified("memory", "enabled")
+        self._save()
+
+    def get_memory_db_path(self) -> str:
+        memory = self._settings.get("memory")
+        default = str(get_config_dir() / "memory.db")
+        return memory.get("dbPath", default) if isinstance(memory, dict) else default
+
+    def get_memory_top_k(self) -> int:
+        memory = self._settings.get("memory")
+        return memory.get("topK", 3) if isinstance(memory, dict) else 3
+
+    def get_memory_auto_capture(self) -> bool:
+        memory = self._settings.get("memory")
+        return memory.get("autoCapture", True) if isinstance(memory, dict) else True
+
+    def get_memory_settings(self) -> dict[str, Any]:
+        return {
+            "enabled": self.get_memory_enabled(),
+            "dbPath": self.get_memory_db_path(),
+            "topK": self.get_memory_top_k(),
+            "autoCapture": self.get_memory_auto_capture(),
+        }
+
     def get_branch_summary_settings(self) -> dict[str, Any]:
         branch_summary = self._settings.get("branchSummary")
         if not isinstance(branch_summary, dict):
@@ -762,29 +777,6 @@ class SettingsManager:
     def get_branch_summary_skip_prompt(self) -> bool:
         branch_summary = self._settings.get("branchSummary")
         return branch_summary.get("skipPrompt", False) if isinstance(branch_summary, dict) else False
-
-    def get_retry_enabled(self) -> bool:
-        retry = self._settings.get("retry")
-        return retry.get("enabled", True) if isinstance(retry, dict) else True
-
-    def set_retry_enabled(self, enabled: bool) -> None:
-        retry = self._global_settings.get("retry")
-        if not isinstance(retry, dict):
-            retry = {}
-        retry["enabled"] = enabled
-        self._global_settings.set("retry", retry)
-        self._mark_modified("retry", "enabled")
-        self._save()
-
-    def get_retry_settings(self) -> dict[str, Any]:
-        retry = self._settings.get("retry")
-        if not isinstance(retry, dict):
-            retry = {}
-        return {
-            "enabled": retry.get("enabled", True),
-            "maxRetries": retry.get("maxRetries", 3),
-            "baseDelayMs": retry.get("baseDelayMs", 2000),
-        }
 
     def get_http_idle_timeout_ms(self) -> int:
         value = self._settings.get("httpIdleTimeoutMs")
@@ -800,17 +792,6 @@ class SettingsManager:
         self._global_settings.set("httpIdleTimeoutMs", int(timeout_ms))
         self._mark_modified("httpIdleTimeoutMs")
         self._save()
-
-    def get_provider_retry_settings(self) -> dict[str, Any]:
-        retry = self._settings.get("retry")
-        provider = retry.get("provider") if isinstance(retry, dict) else None
-        if not isinstance(provider, dict):
-            provider = {}
-        return {
-            "timeoutMs": provider.get("timeoutMs"),
-            "maxRetries": provider.get("maxRetries"),
-            "maxRetryDelayMs": provider.get("maxRetryDelayMs", 60000),
-        }
 
     def get_websocket_connect_timeout_ms(self) -> int | None:
         value = self._settings.get("websocketConnectTimeoutMs")

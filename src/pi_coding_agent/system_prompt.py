@@ -24,6 +24,14 @@ class BuildSystemPromptOptions:
     # Whether the user can be asked a follow-up question and reply in a
     # later turn (true for interactive mode, false for print/subagent runs).
     interactive: bool = True
+    # Snippets of relevant persisted memories for the current turn, already
+    # formatted as "[type] title: content". Changes every turn, unlike
+    # context_files/skills which are fixed for the session.
+    memories: list[str] | None = None
+    # Whether the memory subsystem is active for this session — controls
+    # whether the <memory_policy> guideline (instructing the model to call
+    # `remember` proactively) is included.
+    memory_enabled: bool = False
 
 
 def build_system_prompt(options: BuildSystemPromptOptions) -> str:
@@ -37,6 +45,8 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         prompt = options.custom_prompt
         if append_section:
             prompt += append_section
+        prompt += _format_memories_for_prompt(options.memories)
+        prompt += _memory_policy_block(options.memory_enabled)
         if context_files:
             prompt += "\n\n<project_context>\n\n"
             prompt += "Project-specific instructions and guidelines:\n\n"
@@ -117,6 +127,9 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     if append_section:
         prompt += append_section
 
+    prompt += _format_memories_for_prompt(options.memories)
+    prompt += _memory_policy_block(options.memory_enabled)
+
     if context_files:
         prompt += "\n\n<project_context>\n\n"
         prompt += "Project-specific instructions and guidelines:\n\n"
@@ -129,6 +142,28 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
 
     prompt += f"\nCurrent working directory: {prompt_cwd}"
     return prompt
+
+
+_MEMORY_POLICY = (
+    "\n\n<memory_policy>\n"
+    "You have access to a persistent memory store via the `remember` and `recall` tools. "
+    "Whenever you notice a technical/architectural decision or a stated style preference from "
+    "the user, call `remember` (type=decision or type=style) proactively, without waiting for "
+    "confirmation. Relevant memories from past sessions are already provided above in "
+    "<memories> when applicable.\n"
+    "</memory_policy>\n"
+)
+
+
+def _format_memories_for_prompt(memories: list[str] | None) -> str:
+    if not memories:
+        return ""
+    lines = "\n".join(f"- {m}" for m in memories)
+    return f"\n\n<memories>\n{lines}\n</memories>\n"
+
+
+def _memory_policy_block(enabled: bool) -> str:
+    return _MEMORY_POLICY if enabled else ""
 
 
 def _format_skills_for_prompt(skills: list[Any]) -> str:
