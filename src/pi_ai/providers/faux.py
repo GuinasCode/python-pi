@@ -33,7 +33,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.models import Provider
-from pi_ai.utils import describe_exception
+from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_API = "faux"
 DEFAULT_PROVIDER = "faux"
@@ -450,7 +450,7 @@ def faux_provider(
                 outer.push(ErrorEvent(reason="error", error=msg))
                 outer.end(msg)
 
-        _run_task = asyncio.ensure_future(_run())  # noqa: RUF006
+        spawn_background_task(_run())
         return outer
 
     provider: Provider[Any] = Provider(

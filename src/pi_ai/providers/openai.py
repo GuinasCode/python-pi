@@ -34,7 +34,7 @@ from pi_ai import (
     UserMessage,
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
-from pi_ai.utils import describe_exception
+from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_API = "openai-completions"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -344,9 +344,7 @@ def _create_openai_provider(
             stream.push(ErrorEvent(reason="error", error=error_msg))
             stream.end(error_msg)
 
-    import asyncio
-
-    _run_task = asyncio.ensure_future(_run())  # noqa: RUF006
+    spawn_background_task(_run())
     return stream
 
 

@@ -2,18 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import unicodedata
 import uuid as _uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 
 def uuid() -> str:
     """Generate a v4 UUID string."""
     return str(_uuid.uuid4())
+
+
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def spawn_background_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Schedule *coro* on the running loop, keeping a strong reference alive.
+
+    ``asyncio.ensure_future(coro)`` without holding onto the returned task
+    lets the task be garbage-collected mid-flight (CPython only keeps a weak
+    reference internally), which can silently kill an in-progress stream.
+    Retaining it in a module-level set until it completes avoids that.
+    """
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 def describe_exception(exc: BaseException) -> str:

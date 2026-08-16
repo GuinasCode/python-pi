@@ -13,7 +13,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Any, Literal, cast
@@ -41,7 +40,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
-from pi_ai.utils import describe_exception
+from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 MAX_TOKENS = 16384
@@ -313,5 +312,5 @@ def _create_stream(
             stream.push(ErrorEvent(reason="error", error=err))
             stream.end(err)
 
-    _task = asyncio.ensure_future(_run_stream())  # noqa: RUF006
+    spawn_background_task(_run_stream())
     return stream
