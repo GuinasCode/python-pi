@@ -35,11 +35,20 @@ from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
 from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_config_dir, get_session_dir
 from pi_coding_agent.diff_render import render_diff
+from pi_coding_agent.git_info import get_git_repo_line
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
+from pi_coding_agent.permission_mode import (
+    PermissionDecision,
+    PermissionMode,
+    cycle_permission_mode,
+    permission_decision,
+    permission_mode_label,
+)
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
 from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW
 from pi_memory import MemoryStore
+from pi_tui.raw_input import read_line_with_cycle
 
 _console = Console(highlight=False, soft_wrap=True)
 _err_console = Console(highlight=False, soft_wrap=True, stderr=True)
@@ -209,6 +218,11 @@ class InteractiveSession:
         except Exception:
             memory_store = None
 
+        # Cyclable permission mode (shift+tab), shown in the footer and
+        # enforced via _permission_gate below — set before constructing the
+        # AgentSession since the gate closure reads it on every tool call.
+        self._permission_mode = PermissionMode.DEFAULT
+
         self._agent_session = AgentSession(
             AgentSessionOptions(
                 models=models,
@@ -220,6 +234,7 @@ class InteractiveSession:
                 skills=resources.skills,
                 memory_store=memory_store,
                 memory_top_k=memory_top_k,
+                permission_gate=self._permission_gate,
             )
         )
 
@@ -236,6 +251,38 @@ class InteractiveSession:
         self._text_block_buf = ""
         # Human-readable current status shown below the input box.
         self._status = "ready"
+
+    def _cycle_permission_mode(self) -> None:
+        self._permission_mode = cycle_permission_mode(self._permission_mode)
+
+    async def _permission_gate(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """AgentSessionOptions.permission_gate: allow/ask/deny a tool call
+        based on the current permission mode, before it runs."""
+        decision = permission_decision(self._permission_mode, tool_name)
+        if decision is PermissionDecision.ALLOW:
+            return True
+        if decision is PermissionDecision.DENY:
+            _console.print(
+                f"[{PASTEL_RED}]blocked[/{PASTEL_RED}] [bold]{escape(tool_name)}[/bold] — plan mode is "
+                "read-only [dim](shift+tab to change mode)[/dim]"
+            )
+            return False
+        return await self._confirm_tool(tool_name, args)
+
+    async def _confirm_tool(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """Ask the user to approve a single mutating tool call (y/N)."""
+        args_str = _fmt_args(args)
+        _console.print(
+            f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] Allow [bold]{escape(tool_name)}[/bold]({args_str})? "
+            "[dim](y/N)[/dim]",
+            end=" ",
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            answer = await loop.run_in_executor(None, input)
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        return answer.strip().lower() in ("y", "yes")
 
     def _restore_persisted_messages(self) -> None:
         if not self._session_manager or not self._session_id:
@@ -444,8 +491,50 @@ class InteractiveSession:
         dot = "[green]●[/green]" if self._status == "ready" else "[yellow]●[/yellow]"
         return f"{dot} [dim]{self._status}  ·  {provider}/{model_id}  ·  {session_info}[/dim]"
 
+    def _mode_line(self) -> str:
+        """Permission-mode line shown below the state line (shift+tab to cycle)."""
+        label = permission_mode_label(self._permission_mode)
+        color = PASTEL_YELLOW if self._permission_mode is not PermissionMode.DEFAULT else DIM_STYLE
+        return f"[{color}]{escape(label)}[/{color}] [{DIM_STYLE}](shift+tab to cycle)[/{DIM_STYLE}]"
+
+    def _repo_line(self) -> str | None:
+        """'(repo-name:branch)' line shown below the permission-mode line, if cwd is a git repo."""
+        line = get_git_repo_line(self._cwd)
+        if not line:
+            return None
+        return f"[{DIM_STYLE}]{escape(line)}[/{DIM_STYLE}]"
+
+    def _redraw_footer(self, *, has_repo_line: bool) -> None:
+        """Re-render the state/mode[/repo] lines below the input row in
+        place, without disturbing the cursor position or the text being
+        typed above them. Called as the Shift+Tab handler from inside
+        _edit_loop, so it must not print anything that could scroll the
+        screen — only reposition within rows already drawn by _prompt_input.
+        """
+        sys.stdout.write("\x1b7")  # DECSC: save cursor position
+        sys.stdout.write("\x1b[2B\r\x1b[2K")  # down to the state-line row, clear it
+        sys.stdout.flush()
+        _console.print(self._state_line(), end="")
+        sys.stdout.write("\x1b[1B\r\x1b[2K")
+        sys.stdout.flush()
+        _console.print(self._mode_line(), end="")
+        if has_repo_line:
+            repo_line = self._repo_line()
+            if repo_line:
+                sys.stdout.write("\x1b[1B\r\x1b[2K")
+                sys.stdout.flush()
+                _console.print(repo_line, end="")
+        sys.stdout.write("\x1b8")  # DECRC: restore cursor position
+        sys.stdout.flush()
+
     async def _prompt_input(self) -> str | None:
-        """Draw the bordered input area, return stripped text or None on exit."""
+        """Draw the bordered input area with a live footer, return stripped text or None on exit.
+
+        The footer (state / permission mode / repo:branch) is drawn once
+        below the input row before typing starts, then the cursor hops back
+        up so the prompt lands on the input row. Shift+Tab redraws the
+        footer in place via _redraw_footer while the cursor stays put.
+        """
         w = _console.width
 
         # Tips — left-aligned, one line above the top border
@@ -456,27 +545,52 @@ class InteractiveSession:
         sys.stdout.write("─" * w + "\n")
         sys.stdout.flush()
 
+        repo_line = self._repo_line()
+        footer_rows = 3 + (1 if repo_line else 0)  # bottom rule + state + mode [+ repo]
+
+        # Draw the footer below the (still-empty) input row now, so it's
+        # visible immediately and shift+tab can update it live while typing.
+        sys.stdout.write("\n" + "─" * w + "\n")
+        sys.stdout.flush()
+        _console.print(self._state_line())
+        _console.print(self._mode_line())
+        if repo_line:
+            _console.print(repo_line)
+
+        # Hop back up to the (blank) input row, column 0, for the prompt.
+        sys.stdout.write(f"\x1b[{footer_rows + 1}A")
+        sys.stdout.flush()
+
+        def on_cycle() -> None:
+            self._cycle_permission_mode()
+            self._redraw_footer(has_repo_line=bool(repo_line))
+
+        def land_below_footer() -> None:
+            # A real "\n" for the last step (not another CSI-B) so the
+            # terminal scrolls if the footer was sitting at the bottom of
+            # the visible viewport — cursor-only movement would just clamp
+            # there instead of producing a fresh line to print into.
+            if footer_rows > 1:
+                sys.stdout.write(f"\x1b[{footer_rows - 1}B")
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
         # Input line — the terminal wraps long input across multiple lines
         # on its own, so the rule above/below grows with the input naturally.
         try:
-            raw = await asyncio.get_running_loop().run_in_executor(None, lambda: input("\033[1m>\033[0m "))
+            raw = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: read_line_with_cycle("\033[1m>\033[0m ", on_cycle=on_cycle),
+            )
         except EOFError:
-            sys.stdout.write("\n" + "─" * w + "\n")
-            sys.stdout.flush()
+            land_below_footer()
             return None
         except KeyboardInterrupt:
-            sys.stdout.write("\n" + "─" * w + "\n")
-            sys.stdout.flush()
+            land_below_footer()
             _console.print("[dim]interrupted[/dim]")
             return ""
 
-        # Bottom rule
-        sys.stdout.write("─" * w + "\n")
-        sys.stdout.flush()
-
-        # State line immediately below bottom border
-        _console.print(self._state_line())
-
+        land_below_footer()
         return raw.strip()
 
     def _print_user_message(self, text: str) -> None:

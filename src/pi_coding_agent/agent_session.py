@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -232,6 +232,12 @@ class AgentSessionOptions:
     # prompt at the start of every prompt() call.
     memory_store: MemoryStore | None = None
     memory_top_k: int = 3
+    # Called before every tool call with (tool_name, arguments); return False
+    # to deny it (a denial ToolResult is fed back to the model instead of
+    # running the tool). None means every tool call is allowed unconditionally
+    # — the caller (e.g. the interactive permission-mode footer) owns the
+    # actual policy, this is just the enforcement point.
+    permission_gate: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None
 
 
 class AgentSession:
@@ -254,6 +260,7 @@ class AgentSession:
         self._text_buffer = ""
         self._memory_store = options.memory_store
         self._memory_top_k = options.memory_top_k
+        self._permission_gate = options.permission_gate
         if self._memory_store is not None:
             self._memory_store.embeddings.set_progress_callback(
                 lambda message: self._emit(_MemoryDownloadEvent(message=message))
@@ -374,6 +381,28 @@ class AgentSession:
                     continue
                 tool_call = block
                 self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
+
+                if self._permission_gate is not None and not await self._permission_gate(
+                    tool_call.name, tool_call.arguments
+                ):
+                    denial_text = (
+                        "Permission denied: the user (or the current permission mode) did not approve this action."
+                    )
+                    self._emit(
+                        _ToolCallEndEvent(name=tool_call.name, is_error=True, result_text=denial_text, details=None)
+                    )
+                    self._messages.append(
+                        ToolResultMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_call.name,
+                            content=[TextContent(text=denial_text)],
+                            details=None,
+                            is_error=True,
+                            timestamp=int(time.time() * 1000),
+                        )
+                    )
+                    continue
+
                 result, is_error, details = await self._execute_tool_call(tool_call)
                 result_text = result[0].get("text", "") if result else ""
                 self._emit(
