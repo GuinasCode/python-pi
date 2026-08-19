@@ -116,3 +116,62 @@ class TestMemoryStoreWrite:
     def test_context_manager_closes(self) -> None:
         with MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager()) as store:
             store.write(type=MemoryType.USER, title="t", content="c")
+
+
+class TestMemoryStoreFindSimilar:
+    def test_finds_close_semantic_match(self) -> None:
+        store = MemoryStore(":memory:", embeddings=FakeEmbeddingManager())
+        existing = store.write(
+            type=MemoryType.STYLE,
+            title="Terse replies",
+            content="User prefers terse concise replies always.",
+        )
+
+        result = store.find_similar("Terse replies", "User prefers terse concise replies always.")
+        assert result is not None
+        record, distance = result
+        assert record.id == existing.id
+        assert distance <= 0.5
+        store.close()
+
+    def test_no_match_when_unrelated(self) -> None:
+        store = MemoryStore(":memory:", embeddings=FakeEmbeddingManager())
+        store.write(type=MemoryType.STYLE, title="Terse replies", content="User prefers terse responses.")
+
+        result = store.find_similar("CI setup", "Runs pytest and mypy on every push to main.")
+        assert result is None
+        store.close()
+
+    def test_returns_none_without_embeddings(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        store.write(type=MemoryType.STYLE, title="Terse replies", content="User prefers terse responses.")
+
+        assert store.find_similar("Terse replies", "User prefers terse responses.") is None
+        store.close()
+
+
+class TestMemoryStoreUpdate:
+    def test_update_overwrites_title_and_content(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        record = store.write(type=MemoryType.STYLE, title="Terse", content="Prefers terse replies.")
+
+        updated = store.update(record.id, title="Terse & direct", content="Prefers terse, direct replies.")
+        assert updated is not None
+        assert updated.id == record.id
+        assert updated.title == "Terse & direct"
+        assert updated.content == "Prefers terse, direct replies."
+        store.close()
+
+    def test_update_reembeds_for_vector_search(self) -> None:
+        store = MemoryStore(":memory:", embeddings=FakeEmbeddingManager())
+        record = store.write(type=MemoryType.STYLE, title="Old title", content="Old unrelated content.")
+
+        store.update(record.id, title="CI setup", content="Runs pytest and mypy on every push to main.")
+        results = store.search("pytest mypy push", top_k=3)
+        assert any(r.id == record.id for r in results)
+        store.close()
+
+    def test_update_missing_id_returns_none(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        assert store.update(999, title="x", content="y") is None
+        store.close()

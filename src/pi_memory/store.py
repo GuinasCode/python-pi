@@ -59,6 +59,13 @@ END;
 _FTS_CANDIDATES = 10
 _VEC_CANDIDATES = 10
 
+# L2 distance on the unit-normalized embeddings produced by EmbeddingManager.
+# For normalized vectors, L2^2 = 2 - 2*cos_sim, so distance <= 0.5 corresponds
+# to cosine similarity >= ~0.875 — close enough to flag as a likely duplicate
+# without the LLM asking, while still leaving room for genuinely distinct
+# memories that merely share vocabulary.
+_DUPLICATE_DISTANCE_THRESHOLD = 0.5
+
 
 class MemoryType(str, Enum):
     DECISION = "decision"
@@ -160,6 +167,65 @@ class MemoryStore:
             updated_at=now,
             source=source,
         )
+
+    def find_similar(
+        self,
+        title: str,
+        content: str,
+        *,
+        project_cwd: str | None = None,
+    ) -> tuple[MemoryRecord, float] | None:
+        """Return the closest existing memory to (title, content) and its distance,
+        if it looks like a likely duplicate (distance <= _DUPLICATE_DISTANCE_THRESHOLD).
+
+        Semantic-only: requires sqlite-vec and a loaded embedding model. Returns
+        None when unavailable or when nothing is close enough — this is a
+        best-effort proactive nudge, not a guarantee of no duplicates.
+        """
+        if not (self._vec_enabled and self._embeddings.is_available()):
+            return None
+        try:
+            vector = self._embeddings.embed(f"{title}: {content}", task="document")
+        except Exception:
+            return None
+        rows = self._conn.execute(
+            "SELECT memory_id, distance FROM memories_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (json.dumps(vector), 1),
+        ).fetchall()
+        if not rows:
+            return None
+        memory_id, distance = rows[0]["memory_id"], float(rows[0]["distance"])
+        if distance > _DUPLICATE_DISTANCE_THRESHOLD:
+            return None
+        record = self._get(memory_id)
+        if record is None:
+            return None
+        if project_cwd is not None and record.project_cwd not in (None, project_cwd):
+            return None
+        return record, distance
+
+    def update(self, memory_id: int, *, title: str, content: str) -> MemoryRecord | None:
+        """Overwrite an existing memory's title/content in place (used to merge
+        a would-be duplicate into the record the user chose to keep)."""
+        if self._get(memory_id) is None:
+            return None
+        now = int(time.time() * 1000)
+        self._conn.execute(
+            "UPDATE memories SET title = ?, content = ?, updated_at = ? WHERE id = ?",
+            (title, content, now, memory_id),
+        )
+        if self._vec_enabled and self._embeddings.is_available():
+            try:
+                vector = self._embeddings.embed(f"{title}: {content}", task="document")
+                self._conn.execute("DELETE FROM memories_vec WHERE memory_id = ?", (memory_id,))
+                self._conn.execute(
+                    "INSERT INTO memories_vec (memory_id, embedding) VALUES (?, ?)",
+                    (memory_id, json.dumps(vector)),
+                )
+            except Exception:
+                pass
+        self._conn.commit()
+        return self._get(memory_id)
 
     def search(
         self,

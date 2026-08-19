@@ -151,6 +151,11 @@ _MEMORY_POLICY = (
     "the user, call `remember` (type=decision or type=style) proactively, without waiting for "
     "confirmation. Relevant memories from past sessions are already provided above in "
     "<memories> when applicable.\n"
+    "If `remember` reports a POSSIBLE_DUPLICATE, do not silently pick an outcome: proactively "
+    "tell the user which existing memory it resembles, what the two have in common, and the "
+    "subtle difference you noticed, then propose a merged version. Let the user accept your "
+    "merge, dictate their own merged wording, or decline and keep both as separate entries — "
+    "then call `remember` again once with the outcome they chose.\n"
     "</memory_policy>\n"
 )
 
