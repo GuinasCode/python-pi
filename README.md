@@ -15,6 +15,7 @@ A Python port of the [Pi coding agent](https://pi.dev) — a minimal agent harne
 | `pi_storage_sqlite` | SQLite session storage backend |
 | `pi_coding_agent` | CLI coding agent with built-in tools |
 | `pi_memory` | Persistent memory across sessions: SQLite + FTS5 + sqlite-vec hybrid search |
+| `pi_evals` | Behavioral, model-backed evals for Pi workflows (`pytest-evals`-based) |
 
 ## Installation
 
@@ -95,6 +96,62 @@ The agent recalls the top matching memories automatically at the start of every 
 can write new ones proactively via the `remember`/`recall` tools. Relevant settings
 (`memory.enabled`, `memory.dbPath`, `memory.topK`, `memory.autoCapture`) live in
 `~/.pi/settings.json` alongside the rest of the config.
+
+## Evals
+
+`pi_evals` runs behavioral, model-backed checks for Pi workflows — an isolated
+`AgentSession` adapted to [`pytest-evals`](https://pypi.org/project/pytest-evals/), used to
+measure end-to-end behavior and compare prompts/tools/models/other harness configurations.
+It's a port of `packages/evals` (the TypeScript project's `vitest-evals`-based suite); see
+[ARCHITECTURE.md](ARCHITECTURE.md) for what's ported vs. still pending.
+
+Unlike the rest of the test suite, evals call a real model and cost real money — install
+the extra and set a default provider/model to run them:
+
+```bash
+uv sync --extra eval
+
+# Runs the eval phase then the analysis phase in one command:
+uv run pi-evals --provider openai --model gpt-5.1
+
+# Equivalent via env vars (useful in CI):
+PI_PROVIDER=openai PI_MODEL=gpt-5.1 uv run pi-evals
+
+# Scope to one file or a -k expression — forwarded to both phases:
+uv run pi-evals --provider openai --model gpt-5.1 tests/pi_evals/test_smoke.py
+uv run pi-evals --provider openai --model gpt-5.1 -k "smoke"
+```
+
+A plain `uv run pytest` run — the normal test suite, CI included — never triggers evals:
+`pytest-evals` only collects `@pytest.mark.eval`-marked tests when invoked with
+`--run-eval`, which is exactly what `pi-evals` (or the manually-triggered
+[`evals.yml`](.github/workflows/evals.yml) GitHub Actions workflow) does.
+
+Writing an eval:
+
+```python
+import asyncio
+import pytest
+from pi_evals import create_pi_coding_agent_harness
+
+harness = create_pi_coding_agent_harness(no_tools=True)
+
+@pytest.mark.eval(name="my_eval")
+def test_answers_a_question(eval_bag):
+    result = asyncio.run(harness.run("What is the capital of France?"))
+    eval_bag.output = result.output
+    assert "Paris" in result.output
+
+@pytest.mark.eval_analysis(name="my_eval")
+def test_my_eval_analysis(eval_results):
+    assert len(eval_results) > 0
+```
+
+See `pi_evals.judges` for LLM-as-judge scoring with observation-only thresholds, and
+`pi_evals.harness_table` for comparative baseline/candidate eval sets with pass-rate lift.
+Run artifacts (`.eval/runs.jsonl` + per-run session snapshots) are written via
+`pi_evals.artifacts.EvalArtifactWriter` — gitignored, same as pytest-evals' own
+`test-out/` result dumps.
 
 ## Architecture
 

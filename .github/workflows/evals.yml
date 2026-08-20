@@ -1,0 +1,52 @@
+name: Evals
+
+# Manual only — evals call a real LLM (cost + requires a provider API key),
+# so this never runs on push/PR like ci.yml does.
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Model provider (e.g. openai, nvidia_glm)"
+        required: true
+      model:
+        description: "Model id"
+        required: true
+      test_path:
+        description: "pytest path/expression to scope the run"
+        required: false
+        default: "tests/pi_evals"
+
+jobs:
+  run-evals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --extra eval --extra dev
+
+      - name: Run evals
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NVAPI_KEY: ${{ secrets.NVAPI_KEY }}
+        run: >
+          uv run pi-evals
+          --provider "${{ inputs.provider }}"
+          --model "${{ inputs.model }}"
+          "${{ inputs.test_path }}"
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eval-results
+          path: |
+            .eval/
+            test-out/
+          if-no-files-found: ignore

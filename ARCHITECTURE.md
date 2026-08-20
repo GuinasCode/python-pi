@@ -2,7 +2,15 @@
 
 This document captures the initial architecture decision record for converting `python-pi` from the current TypeScript monorepo to a pure Python project.
 
-**Status note:** the plan below is the original ADR and is largely implemented, with one exception — `pi_evals` was never ported and is not part of the current package layout (`src/` has no `pi_evals/`, and it is not listed in `pyproject.toml`). References to it further down are historical; treat them as future/unimplemented scope, not current state.
+**Status note:** the plan below is the original ADR and is largely implemented. `pi_evals`
+now exists (`src/pi_evals/`, `eval` extra in `pyproject.toml`) as a port onto
+[`pytest-evals`](https://pypi.org/project/pytest-evals/) rather than a Python equivalent
+of `vitest-evals` (none exists) — see the README's Evals section for usage. Ported:
+`pi_harness.py` (the `AgentSession` adapter), `judges.py` (LLM-as-judge scoring),
+`harness_table.py` (comparative baseline/candidate sets), `artifacts.py` (`.eval/`
+run/session snapshots), the `pi-evals` CLI, and `smoke.eval.ts` → `test_smoke.py`. Not
+ported: `extensions.eval.ts` — it needs an extensions system (`.pi/extensions`) this
+Python port doesn't have yet; that's a separate, larger prerequisite, not an evals gap.
 
 ## Scope Reality Check
 
