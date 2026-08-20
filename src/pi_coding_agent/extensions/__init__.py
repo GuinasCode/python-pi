@@ -10,6 +10,7 @@ from pi_coding_agent.extensions.loader import (
     load_extension_from_path,
     load_extensions,
 )
+from pi_coding_agent.extensions.runner import ExtensionRunner
 from pi_coding_agent.extensions.types import (
     ExtensionAPI,
     ExtensionError,
@@ -22,6 +23,7 @@ __all__ = [
     "ExtensionAPI",
     "ExtensionError",
     "ExtensionFactory",
+    "ExtensionRunner",
     "LoadExtensionsResult",
     "LoadedExtension",
     "discover_extension_paths",

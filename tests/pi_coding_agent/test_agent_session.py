@@ -243,3 +243,81 @@ class TestReload:
 
         after_prompt = session.get_system_prompt()
         assert "NEW_MARKER_TEXT" in after_prompt
+
+
+_HELLO_EXTENSION = """
+from pi_agent_core.types import AgentTool
+
+def extension(pi):
+    pi.register_tool(AgentTool(name="hello", description="Greets someone", parameters={}))
+"""
+
+
+class TestExtensions:
+    def test_no_runner_configured_means_no_extensions(self, tmp_path: Path) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")], cwd=str(tmp_path))
+        assert session.get_extensions().extensions == []
+        assert session.get_extension_paths() == []
+
+    def test_extension_tools_registered_at_construction(self, tmp_path: Path) -> None:
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        (tmp_path / ".pi" / "extensions").mkdir(parents=True)
+        (tmp_path / ".pi" / "extensions" / "hello.py").write_text(_HELLO_EXTENSION, encoding="utf-8")
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], cwd=str(tmp_path), extension_runner=runner, enable_subagents=False
+        )
+
+        assert "hello" in session.get_active_tool_names()
+        assert len(session.get_extension_paths()) == 1
+
+    def test_reload_picks_up_a_newly_created_extension(self, tmp_path: Path) -> None:
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], cwd=str(tmp_path), extension_runner=runner, enable_subagents=False
+        )
+        assert "hello" not in session.get_active_tool_names()
+
+        (tmp_path / ".pi" / "extensions").mkdir(parents=True)
+        (tmp_path / ".pi" / "extensions" / "hello.py").write_text(_HELLO_EXTENSION, encoding="utf-8")
+        asyncio.run(session.reload())
+
+        assert "hello" in session.get_active_tool_names()
+        assert session.get_extensions().extensions[0].tool_names == ["hello"]
+
+    def test_reload_drops_tools_from_a_removed_extension(self, tmp_path: Path) -> None:
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "hello.py").write_text(_HELLO_EXTENSION, encoding="utf-8")
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], cwd=str(tmp_path), extension_runner=runner, enable_subagents=False
+        )
+        assert "hello" in session.get_active_tool_names()
+
+        (ext_dir / "hello.py").unlink()
+        asyncio.run(session.reload())
+
+        assert "hello" not in session.get_active_tool_names()
+
+    def test_extension_load_error_is_reported_not_raised(self, tmp_path: Path) -> None:
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        (tmp_path / ".pi" / "extensions").mkdir(parents=True)
+        (tmp_path / ".pi" / "extensions" / "broken.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], cwd=str(tmp_path), extension_runner=runner, enable_subagents=False
+        )
+
+        errors = session.get_extensions().errors
+        assert len(errors) == 1
+        assert "boom" in errors[0].error

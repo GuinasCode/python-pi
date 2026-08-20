@@ -28,6 +28,7 @@ from pi_ai import (
     UserMessage,
 )
 from pi_ai.models import MutableModels
+from pi_coding_agent.extensions import ExtensionRunner, LoadExtensionsResult
 from pi_coding_agent.resource_loader import LoadedResources, load_resources
 from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system_prompt
 from pi_coding_agent.tools import ToolResult, edit_file, execute_bash, grep_search, list_files, read_file, write_file
@@ -261,6 +262,10 @@ class AgentSessionOptions:
     # supplied directly via context_files/skills/system_prompt and there is
     # nothing on disk for reload() to re-scan.
     config_dir: str | None = None
+    # When set, tools registered by every extension under cwd's/config_dir's
+    # .pi/extensions/ are loaded once at construction and re-loaded by
+    # reload() — see pi_coding_agent.extensions.ExtensionRunner.
+    extension_runner: ExtensionRunner | None = None
 
 
 class AgentSession:
@@ -285,6 +290,8 @@ class AgentSession:
         self._memory_top_k = options.memory_top_k
         self._permission_gate = options.permission_gate
         self._config_dir = options.config_dir
+        self._extension_runner = options.extension_runner
+        self._extension_tool_names: set[str] = set()
         if self._memory_store is not None:
             self._memory_store.embeddings.set_progress_callback(
                 lambda message: self._emit(_MemoryDownloadEvent(message=message))
@@ -319,6 +326,12 @@ class AgentSession:
             except Exception:
                 pass
 
+        if self._extension_runner is not None:
+            self._extension_runner.load()
+            extension_tools = self._extension_runner.get_tools()
+            base_tools = [*base_tools, *extension_tools]
+            self._extension_tool_names = {t.name for t in extension_tools}
+
         self._tools = base_tools
 
     def on_event(self, listener: Callable[[Any], None]) -> Callable[[], None]:
@@ -338,6 +351,19 @@ class AgentSession:
     def get_active_tool_names(self) -> list[str]:
         """Names of tools currently registered on this session."""
         return [t.name for t in self._tools]
+
+    def get_extensions(self) -> LoadExtensionsResult:
+        """Result of the most recent extension load — empty when no
+        extension_runner was configured for this session."""
+        if self._extension_runner is None:
+            return LoadExtensionsResult()
+        return self._extension_runner.get_extensions()
+
+    def get_extension_paths(self) -> list[str]:
+        """Source paths of every successfully loaded extension."""
+        if self._extension_runner is None:
+            return []
+        return self._extension_runner.get_extension_paths()
 
     def get_last_assistant_text(self) -> str:
         """Concatenated text of the most recent assistant message, or ''."""
@@ -377,21 +403,29 @@ class AgentSession:
 
     async def reload(self) -> None:
         """Re-run resource loading (system prompt/context files/skills) from
-        config_dir against current on-disk state.
+        config_dir, and re-load extensions, against current on-disk state.
 
-        A no-op when config_dir wasn't supplied (resources came in directly
-        via AgentSessionOptions, so there's nothing on disk to re-scan).
-        Useful between prompt steps that create or modify project resources
-        the session should pick up mid-run (e.g. an eval step that writes a
-        new skill file and expects the following prompt to see it).
+        Each half is independently a no-op when its prerequisite wasn't
+        supplied (config_dir for resources, extension_runner for
+        extensions) — resources/tools that came in directly via
+        AgentSessionOptions have nothing on disk to re-scan. Useful between
+        prompt steps that create or modify project resources the session
+        should pick up mid-run (e.g. an eval step that writes a new skill
+        or extension file and expects the following prompt to see it).
         """
-        if self._config_dir is None:
-            return
-        resources = load_resources(self._cwd, self._config_dir)
-        self._system_prompt = resources.system_prompt
-        self._append_system_prompt = resources.append_system_prompt
-        self._context_files = [{"path": f.path, "content": f.content} for f in resources.context_files]
-        self._skills = resources.skills
+        if self._config_dir is not None:
+            resources = load_resources(self._cwd, self._config_dir)
+            self._system_prompt = resources.system_prompt
+            self._append_system_prompt = resources.append_system_prompt
+            self._context_files = [{"path": f.path, "content": f.content} for f in resources.context_files]
+            self._skills = resources.skills
+
+        if self._extension_runner is not None:
+            self._tools = [t for t in self._tools if t.name not in self._extension_tool_names]
+            self._extension_runner.load()
+            extension_tools = self._extension_runner.get_tools()
+            self._tools = [*self._tools, *extension_tools]
+            self._extension_tool_names = {t.name for t in extension_tools}
 
     def _build_system_prompt(self, memories: list[str] | None = None) -> str:
         """Build the system prompt from options."""
