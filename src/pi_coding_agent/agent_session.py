@@ -35,6 +35,19 @@ from pi_memory import MemoryStore, create_memory_tools
 
 
 @dataclass
+class AgentSessionStats:
+    """Aggregated token usage, tool-call count, and cost for a session so far."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+    tool_calls: int = 0
+    cost_total: float = 0.0
+
+
+@dataclass
 class _ToolCallStartEvent:
     type: str = "tool_call_start"
     name: str = ""
@@ -238,6 +251,16 @@ class AgentSessionOptions:
     # — the caller (e.g. the interactive permission-mode footer) owns the
     # actual policy, this is just the enforcement point.
     permission_gate: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None
+    # Only applies when `tools` is None (i.e. the default builtin toolset).
+    # True disables every builtin tool; a list of names excludes just those.
+    # An explicitly-passed `tools` list is never filtered by this.
+    no_tools: bool | list[str] = False
+    # Directory resources (skills/context files/system prompt) were loaded
+    # from at construction time — kept only so reload() can re-run that load
+    # against current on-disk state. None (the default) means resources were
+    # supplied directly via context_files/skills/system_prompt and there is
+    # nothing on disk for reload() to re-scan.
+    config_dir: str | None = None
 
 
 class AgentSession:
@@ -261,12 +284,21 @@ class AgentSession:
         self._memory_store = options.memory_store
         self._memory_top_k = options.memory_top_k
         self._permission_gate = options.permission_gate
+        self._config_dir = options.config_dir
         if self._memory_store is not None:
             self._memory_store.embeddings.set_progress_callback(
                 lambda message: self._emit(_MemoryDownloadEvent(message=message))
             )
 
-        base_tools: list[Tool] = options.tools if options.tools is not None else get_builtin_tools()
+        if options.tools is not None:
+            base_tools: list[Tool] = options.tools
+        elif options.no_tools is True:
+            base_tools = []
+        else:
+            base_tools = get_builtin_tools()
+            if options.no_tools:
+                excluded = set(options.no_tools)
+                base_tools = [t for t in base_tools if t.name not in excluded]
         if self._memory_store is not None and not any(t.name == "remember" for t in base_tools):
             base_tools = [*base_tools, *create_memory_tools(self._memory_store)]
         if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
@@ -302,6 +334,64 @@ class AgentSession:
     def _emit(self, event: Any) -> None:
         for listener in list(self._event_listeners):
             listener(event)
+
+    def get_active_tool_names(self) -> list[str]:
+        """Names of tools currently registered on this session."""
+        return [t.name for t in self._tools]
+
+    def get_last_assistant_text(self) -> str:
+        """Concatenated text of the most recent assistant message, or ''."""
+        for message in reversed(self._messages):
+            if isinstance(message, AssistantMessage):
+                return "".join(block.text for block in message.content if isinstance(block, TextContent))
+        return ""
+
+    def get_session_stats(self) -> AgentSessionStats:
+        """Aggregate token usage, tool-call count, and cost across the session so far."""
+        stats = AgentSessionStats()
+        for message in self._messages:
+            if isinstance(message, AssistantMessage):
+                usage = message.usage
+                stats.input_tokens += usage.input
+                stats.output_tokens += usage.output
+                stats.cache_read_tokens += usage.cache_read
+                stats.cache_write_tokens += usage.cache_write
+                stats.total_tokens += usage.total_tokens
+                stats.cost_total += usage.cost.total
+            elif isinstance(message, ToolResultMessage):
+                stats.tool_calls += 1
+        return stats
+
+    def get_system_prompt(self) -> str:
+        """The system prompt that would be sent on the next prompt() call (no memories)."""
+        return self._build_system_prompt()
+
+    def set_system_prompt_override(self, text: str) -> None:
+        """Replace the system prompt outright for every subsequent prompt() call.
+
+        Used by callers that need to transform the default prompt (e.g. an
+        eval harness comparing prompt variants) without re-deriving it from
+        context_files/skills each time.
+        """
+        self._system_prompt = text
+
+    async def reload(self) -> None:
+        """Re-run resource loading (system prompt/context files/skills) from
+        config_dir against current on-disk state.
+
+        A no-op when config_dir wasn't supplied (resources came in directly
+        via AgentSessionOptions, so there's nothing on disk to re-scan).
+        Useful between prompt steps that create or modify project resources
+        the session should pick up mid-run (e.g. an eval step that writes a
+        new skill file and expects the following prompt to see it).
+        """
+        if self._config_dir is None:
+            return
+        resources = load_resources(self._cwd, self._config_dir)
+        self._system_prompt = resources.system_prompt
+        self._append_system_prompt = resources.append_system_prompt
+        self._context_files = [{"path": f.path, "content": f.content} for f in resources.context_files]
+        self._skills = resources.skills
 
     def _build_system_prompt(self, memories: list[str] | None = None) -> str:
         """Build the system prompt from options."""

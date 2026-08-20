@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from pi_ai import StopReason
@@ -18,14 +19,8 @@ def _setup_faux(responses: list, **extra_options: Any) -> tuple[AgentSession, An
     models.set_provider(handle.provider)
     model = handle.get_model()
     assert model is not None
-    session = AgentSession(
-        AgentSessionOptions(
-            models=models,
-            model=model,
-            cwd="/tmp",
-            **extra_options,
-        )
-    )
+    options: dict[str, Any] = {"models": models, "model": model, "cwd": "/tmp", **extra_options}
+    session = AgentSession(AgentSessionOptions(**options))
     return session, handle
 
 
@@ -145,3 +140,108 @@ class TestPermissionGate:
         tool_results = [m for m in session._messages if getattr(m, "role", "") == "toolResult"]
         assert len(tool_results) == 1
         assert "Permission denied" not in tool_results[0].content[0].text
+
+
+class TestNoTools:
+    def test_no_tools_true_disables_every_builtin(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")], no_tools=True, enable_subagents=False)
+        assert session.get_active_tool_names() == []
+
+    def test_no_tools_list_excludes_only_named_tools(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")], no_tools=["bash", "write"], enable_subagents=False)
+        names = session.get_active_tool_names()
+        assert "bash" not in names
+        assert "write" not in names
+        assert "read" in names
+
+    def test_no_tools_ignored_when_explicit_tools_list_given(self) -> None:
+        from pi_ai import Tool
+
+        custom = [Tool(name="custom", description="d", parameters={})]
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], tools=custom, no_tools=True, enable_subagents=False
+        )
+        assert session.get_active_tool_names() == ["custom"]
+
+
+class TestSessionHelpers:
+    def test_get_active_tool_names_matches_builtin_tools(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")], enable_subagents=False)
+        names = session.get_active_tool_names()
+        assert "read" in names
+        assert "write" in names
+        assert "bash" in names
+
+    def test_get_last_assistant_text_returns_final_text(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("the answer")])
+        asyncio.run(session.prompt("question"))
+        assert session.get_last_assistant_text() == "the answer"
+
+    def test_get_last_assistant_text_empty_when_no_messages(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")])
+        assert session.get_last_assistant_text() == ""
+
+    def test_get_session_stats_aggregates_usage_and_tool_calls(self) -> None:
+        # faux_provider recomputes .usage from content length on every response
+        # (see _with_usage_estimate), so presetting it before queueing has no
+        # effect — append messages straight to session._messages instead, the
+        # same private-state access the permission-gate tests above already use.
+        from pi_ai import TextContent, ToolCall, ToolResultMessage, UsageCost
+
+        session, _ = _setup_faux([faux_assistant_message("unused")])
+
+        tool_msg = faux_assistant_message(
+            [ToolCall(id="t1", name="read", arguments={"path": "x"})], stop_reason=StopReason.TOOL_USE
+        )
+        tool_msg.usage.input = 10
+        tool_msg.usage.output = 5
+        tool_msg.usage.total_tokens = 15
+        tool_msg.usage.cost = UsageCost(total=0.01)
+        session._messages.append(tool_msg)
+        session._messages.append(
+            ToolResultMessage(tool_call_id="t1", tool_name="read", content=[TextContent(text="ok")])
+        )
+
+        final_msg = faux_assistant_message("done")
+        final_msg.usage.input = 20
+        final_msg.usage.output = 8
+        final_msg.usage.total_tokens = 28
+        final_msg.usage.cost = UsageCost(total=0.02)
+        session._messages.append(final_msg)
+
+        stats = session.get_session_stats()
+        assert stats.input_tokens == 30
+        assert stats.output_tokens == 13
+        assert stats.total_tokens == 43
+        assert stats.tool_calls == 1
+        assert abs(stats.cost_total - 0.03) < 1e-9
+
+    def test_get_system_prompt_and_override(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")])
+        default_prompt = session.get_system_prompt()
+        assert default_prompt
+
+        session.set_system_prompt_override("Custom override prompt.")
+        assert session.get_system_prompt().startswith("Custom override prompt.")
+
+
+class TestReload:
+    def test_reload_without_config_dir_is_a_noop(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")])
+        before = session.get_system_prompt()
+        asyncio.run(session.reload())
+        assert session.get_system_prompt() == before
+
+    def test_reload_picks_up_new_context_file_from_disk(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / ".pi"
+        config_dir.mkdir()
+        session, _ = _setup_faux([faux_assistant_message("hi")], cwd=str(tmp_path), config_dir=str(config_dir))
+
+        before_prompt = session.get_system_prompt()
+        assert "NEW_MARKER_TEXT" not in before_prompt
+
+        (tmp_path / "AGENTS.md").write_text("NEW_MARKER_TEXT", encoding="utf-8")
+        asyncio.run(session.reload())
+
+        after_prompt = session.get_system_prompt()
+        assert "NEW_MARKER_TEXT" in after_prompt
