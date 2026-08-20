@@ -321,3 +321,164 @@ class TestExtensions:
         errors = session.get_extensions().errors
         assert len(errors) == 1
         assert "boom" in errors[0].error
+
+
+class TestExtensionLifecycleEvents:
+    def _session_with_handlers(self, tmp_path: Path, handlers: dict[str, list[Any]]) -> AgentSession:
+        # AgentSession.__init__ calls extension_runner.load() itself (Phase B),
+        # which would wipe out handlers injected beforehand — so build the
+        # session first, then inject handlers directly onto its runner.
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [faux_assistant_message("hi")], cwd=str(tmp_path), extension_runner=runner, enable_subagents=False
+        )
+        runner._handlers = {name: [("fake.py", h) for h in hs] for name, hs in handlers.items()}
+        return session
+
+    def test_agent_start_and_end_fire_once_per_prompt(self, tmp_path: Path) -> None:
+        seen: list[str] = []
+        session = self._session_with_handlers(
+            tmp_path,
+            {
+                "agent_start": [lambda _e, _c: seen.append("start")],
+                "agent_end": [lambda _e, _c: seen.append("end")],
+            },
+        )
+        asyncio.run(session.prompt("hi"))
+        assert seen == ["start", "end"]
+
+    def test_agent_end_fires_even_when_max_turns_reached(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        seen: list[str] = []
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        responses = [
+            faux_assistant_message([faux_tool_call("read", {"path": "x"})], stop_reason=StopReason.TOOL_USE)
+            for _ in range(5)
+        ]
+        session, _ = _setup_faux(
+            responses,
+            cwd=str(tmp_path),
+            extension_runner=runner,
+            enable_subagents=False,
+            max_turns=2,
+        )
+        runner._handlers = {"agent_end": [("fake.py", lambda _e, _c: seen.append("end"))]}
+        asyncio.run(session.prompt("hi"))
+        assert seen == ["end"]
+
+    def test_session_start_fires_once_across_multiple_prompts(self, tmp_path: Path) -> None:
+        seen: list[str] = []
+        session = self._session_with_handlers(tmp_path, {"session_start": [lambda _e, _c: seen.append("start")]})
+        asyncio.run(session.prompt("first"))
+        assert seen == ["start"]
+
+    def test_turn_start_and_end_fire_per_turn(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        seen: list[tuple[str, int]] = []
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message([faux_tool_call("read", {"path": "x"})], stop_reason=StopReason.TOOL_USE),
+                faux_assistant_message("done"),
+            ],
+            cwd=str(tmp_path),
+            extension_runner=runner,
+            enable_subagents=False,
+        )
+        runner._handlers = {
+            "turn_start": [("fake.py", lambda e, _c: seen.append(("start", e.turn)))],
+            "turn_end": [("fake.py", lambda e, _c: seen.append(("end", e.turn)))],
+        }
+        asyncio.run(session.prompt("hi"))
+        assert seen == [("start", 0), ("end", 0), ("start", 1), ("end", 1)]
+
+    def test_tool_call_block_prevents_execution(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+        from pi_coding_agent.extensions import ExtensionRunner
+        from pi_coding_agent.extensions.events import ToolCallEventResult
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message(
+                    [faux_tool_call("write", {"path": str(tmp_path / "x"), "content": "y"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+            cwd=str(tmp_path),
+            extension_runner=runner,
+            enable_subagents=False,
+        )
+        runner._handlers = {"tool_call": [("fake.py", lambda _e, _c: ToolCallEventResult(block=True, reason="nope"))]}
+        asyncio.run(session.prompt("write something"))
+
+        tool_results = [m for m in session._messages if getattr(m, "role", "") == "toolResult"]
+        assert len(tool_results) == 1
+        assert tool_results[0].is_error is True
+        assert "nope" in tool_results[0].content[0].text
+        assert not (tmp_path / "x").exists()
+
+    def test_tool_call_mutates_arguments_before_execution(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+        from pi_coding_agent.extensions import ExtensionRunner
+
+        def _redirect(event: Any, _ctx: Any) -> None:
+            event.arguments["path"] = str(tmp_path / "redirected")
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message(
+                    [faux_tool_call("write", {"path": str(tmp_path / "original"), "content": "hi"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+            cwd=str(tmp_path),
+            extension_runner=runner,
+            enable_subagents=False,
+        )
+        runner._handlers = {"tool_call": [("fake.py", _redirect)]}
+        asyncio.run(session.prompt("write something"))
+
+        assert not (tmp_path / "original").exists()
+        assert (tmp_path / "redirected").read_text(encoding="utf-8") == "hi"
+
+    def test_tool_result_override_changes_final_message(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+        from pi_coding_agent.extensions import ExtensionRunner
+        from pi_coding_agent.extensions.events import ToolResultEventResult
+
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message(
+                    [faux_tool_call("read", {"path": "/nonexistent-tool-result-override"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+            cwd=str(tmp_path),
+            extension_runner=runner,
+            enable_subagents=False,
+        )
+        runner._handlers = {"tool_result": [("fake.py", lambda _e, _c: ToolResultEventResult(is_error=True))]}
+        asyncio.run(session.prompt("read something"))
+
+        tool_results = [m for m in session._messages if getattr(m, "role", "") == "toolResult"]
+        assert len(tool_results) == 1
+        assert tool_results[0].is_error is True

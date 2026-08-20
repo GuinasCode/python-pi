@@ -194,5 +194,5 @@ def load_extensions(paths: list[Path]) -> LoadExtensionsResult:
         if error is not None:
             result.errors.append(error)
             continue
-        result.extensions.append(LoadedExtension(path=str(path), tools=api.tools))
+        result.extensions.append(LoadedExtension(path=str(path), tools=api.tools, handlers=api.handlers))
     return result

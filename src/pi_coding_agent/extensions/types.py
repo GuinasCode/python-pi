@@ -18,11 +18,13 @@ inside a registered tool's ``execute()``, which is already async.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from pi_agent_core.types import AgentTool
+from pi_coding_agent.extensions.events import ExtensionHandler
 
 ExtensionFactory = Callable[["ExtensionAPI"], Any]
 
@@ -37,14 +39,16 @@ class ExtensionError:
 
 @dataclass
 class LoadedExtension:
-    """One successfully loaded extension: its source path and the tools it
-    registered. ``tool_names`` is a convenience view for display/reporting
-    (mirrors the original's ``tools.keys()``); ``tools`` holds the actual
-    :class:`AgentTool` objects, the source of truth callers register into
-    an ``AgentSession``."""
+    """One successfully loaded extension: its source path, the tools it
+    registered, and the event handlers it subscribed. ``tool_names`` is a
+    convenience view for display/reporting (mirrors the original's
+    ``tools.keys()``); ``tools`` holds the actual :class:`AgentTool`
+    objects, the source of truth callers register into an
+    ``AgentSession``."""
 
     path: str
     tools: list[AgentTool] = field(default_factory=list)
+    handlers: dict[str, list[ExtensionHandler]] = field(default_factory=dict)
 
     @property
     def tool_names(self) -> list[str]:
@@ -60,13 +64,14 @@ class LoadExtensionsResult:
 class ExtensionAPI:
     """The ``pi`` object passed to an extension's entry point.
 
-    Phase A/B surface: tool registration only. Later phases add event
-    subscription (``on``), command/shortcut/flag registration, rendering
-    hooks, and provider registration directly onto this class.
+    Phase A/B/D surface: tool registration and event subscription.
+    Command/shortcut/flag registration, rendering hooks, and provider
+    registration are added directly onto this class by later phases.
     """
 
     def __init__(self) -> None:
         self._tools: list[AgentTool] = []
+        self._handlers: dict[str, list[ExtensionHandler]] = defaultdict(list)
 
     def register_tool(self, tool: AgentTool) -> None:
         """Register a tool the LLM can call."""
@@ -75,3 +80,14 @@ class ExtensionAPI:
     @property
     def tools(self) -> list[AgentTool]:
         return list(self._tools)
+
+    def on(self, event_name: str, handler: ExtensionHandler) -> None:
+        """Subscribe to a lifecycle event. See pi_coding_agent.extensions.events
+        for the currently-supported event names and their (event, result) shapes:
+        "tool_call", "tool_result", "agent_start", "agent_end", "turn_start",
+        "turn_end", "session_start", "session_shutdown"."""
+        self._handlers[event_name].append(handler)
+
+    @property
+    def handlers(self) -> dict[str, list[ExtensionHandler]]:
+        return dict(self._handlers)

@@ -29,6 +29,15 @@ from pi_ai import (
 )
 from pi_ai.models import MutableModels
 from pi_coding_agent.extensions import ExtensionRunner, LoadExtensionsResult
+from pi_coding_agent.extensions.events import (
+    AgentEndEvent,
+    AgentStartEvent,
+    SessionStartEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnEndEvent,
+    TurnStartEvent,
+)
 from pi_coding_agent.resource_loader import LoadedResources, load_resources
 from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system_prompt
 from pi_coding_agent.tools import ToolResult, edit_file, execute_bash, grep_search, list_files, read_file, write_file
@@ -292,6 +301,7 @@ class AgentSession:
         self._config_dir = options.config_dir
         self._extension_runner = options.extension_runner
         self._extension_tool_names: set[str] = set()
+        self._session_started = False
         if self._memory_store is not None:
             self._memory_store.embeddings.set_progress_callback(
                 lambda message: self._emit(_MemoryDownloadEvent(message=message))
@@ -463,87 +473,40 @@ class AgentSession:
             return []
         return [f"[{r.type.value}] {r.title}: {r.content}" for r in records]
 
+    async def _emit_ext(self, event_name: str, event: Any) -> None:
+        """Fire a notification-only extension lifecycle event, if an
+        extension_runner is configured. No-op otherwise."""
+        if self._extension_runner is not None:
+            await self._extension_runner.emit(event_name, event)
+
     async def prompt(self, text: str) -> AssistantMessage:
         """Send a prompt to the model and run the agent loop until completion."""
+        if self._extension_runner is not None and not self._session_started:
+            # Fired lazily on first use rather than in __init__, which is
+            # synchronous while extension handlers are async.
+            await self._extension_runner.emit("session_start", SessionStartEvent())
+            self._session_started = True
+
         memories = await self._recall_memories(text)
         system_prompt = self._build_system_prompt(memories)
         user_msg = UserMessage(content=text, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 
-        for _turn in range(self._max_turns):
-            self._compact_context_if_needed()
-            context = Context(
-                system_prompt=system_prompt,
-                messages=self._messages,
-                tools=self._tools,
-            )
+        await self._emit_ext("agent_start", AgentStartEvent())
+        try:
+            return await self._run_turns(system_prompt)
+        finally:
+            await self._emit_ext("agent_end", AgentEndEvent())
 
-            stream_options = (
-                SimpleStreamOptions(temperature=self._temperature) if self._temperature is not None else None
-            )
-            stream = self._models.stream(self._model, context, stream_options)
-            assistant_msg = await self._consume_stream(stream)
-
-            if assistant_msg is None:
-                return AssistantMessage(
-                    content=[TextContent(text="Error: no response from model")],
-                    api=self._model.api,
-                    provider=self._model.provider,
-                    model=self._model.id,
-                    stop_reason=StopReason.ERROR,
-                    timestamp=int(time.time() * 1000),
-                )
-
-            self._messages.append(assistant_msg)
-
-            if assistant_msg.stop_reason != StopReason.TOOL_USE:
-                return assistant_msg
-
-            # Execute tool calls — support both AgentTool (async) and builtin (sync).
-            for block in assistant_msg.content:
-                if not isinstance(block, ToolCall):
-                    continue
-                tool_call = block
-                self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
-
-                if self._permission_gate is not None and not await self._permission_gate(
-                    tool_call.name, tool_call.arguments
-                ):
-                    denial_text = (
-                        "Permission denied: the user (or the current permission mode) did not approve this action."
-                    )
-                    self._emit(
-                        _ToolCallEndEvent(name=tool_call.name, is_error=True, result_text=denial_text, details=None)
-                    )
-                    self._messages.append(
-                        ToolResultMessage(
-                            tool_call_id=tool_call.id,
-                            tool_name=tool_call.name,
-                            content=[TextContent(text=denial_text)],
-                            details=None,
-                            is_error=True,
-                            timestamp=int(time.time() * 1000),
-                        )
-                    )
-                    continue
-
-                result, is_error, details = await self._execute_tool_call(tool_call)
-                result_text = result[0].get("text", "") if result else ""
-                self._emit(
-                    _ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text, details=details)
-                )
-                tool_content: list[TextContent | ImageContent] = [
-                    TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"
-                ]
-                tool_result_msg = ToolResultMessage(
-                    tool_call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    content=tool_content,
-                    details=details,
-                    is_error=is_error,
-                    timestamp=int(time.time() * 1000),
-                )
-                self._messages.append(tool_result_msg)
+    async def _run_turns(self, system_prompt: str) -> AssistantMessage:
+        for turn_index in range(self._max_turns):
+            await self._emit_ext("turn_start", TurnStartEvent(turn=turn_index))
+            try:
+                turn_result = await self._run_one_turn(system_prompt)
+                if turn_result is not None:
+                    return turn_result
+            finally:
+                await self._emit_ext("turn_end", TurnEndEvent(turn=turn_index))
 
         return AssistantMessage(
             content=[TextContent(text="Max turns reached")],
@@ -552,6 +515,113 @@ class AgentSession:
             model=self._model.id,
             stop_reason=StopReason.LENGTH,
             timestamp=int(time.time() * 1000),
+        )
+
+    async def _run_one_turn(self, system_prompt: str) -> AssistantMessage | None:
+        """Run one model round-trip (+ any resulting tool calls). Returns the
+        final AssistantMessage if the conversation should stop here, or None
+        to continue looping (another turn follows, e.g. after tool use)."""
+        self._compact_context_if_needed()
+        context = Context(
+            system_prompt=system_prompt,
+            messages=self._messages,
+            tools=self._tools,
+        )
+
+        stream_options = SimpleStreamOptions(temperature=self._temperature) if self._temperature is not None else None
+        stream = self._models.stream(self._model, context, stream_options)
+        assistant_msg = await self._consume_stream(stream)
+
+        if assistant_msg is None:
+            return AssistantMessage(
+                content=[TextContent(text="Error: no response from model")],
+                api=self._model.api,
+                provider=self._model.provider,
+                model=self._model.id,
+                stop_reason=StopReason.ERROR,
+                timestamp=int(time.time() * 1000),
+            )
+
+        self._messages.append(assistant_msg)
+
+        if assistant_msg.stop_reason != StopReason.TOOL_USE:
+            return assistant_msg
+
+        # Execute tool calls — support both AgentTool (async) and builtin (sync).
+        for block in assistant_msg.content:
+            if not isinstance(block, ToolCall):
+                continue
+            await self._run_tool_call(block)
+
+        return None
+
+    async def _run_tool_call(self, tool_call: ToolCall) -> None:
+        self._emit(_ToolCallStartEvent(name=tool_call.name, args=tool_call.arguments))
+
+        if self._extension_runner is not None:
+            call_event = ToolCallEvent(
+                tool_call_id=tool_call.id, tool_name=tool_call.name, arguments=tool_call.arguments
+            )
+            call_result = await self._extension_runner.emit_tool_call(call_event)
+            if call_result is not None and call_result.block:
+                blocked_text = call_result.reason or "Blocked by an extension."
+                self._emit(
+                    _ToolCallEndEvent(name=tool_call.name, is_error=True, result_text=blocked_text, details=None)
+                )
+                self._messages.append(
+                    ToolResultMessage(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_call.name,
+                        content=[TextContent(text=blocked_text)],
+                        details=None,
+                        is_error=True,
+                        timestamp=int(time.time() * 1000),
+                    )
+                )
+                return
+
+        if self._permission_gate is not None and not await self._permission_gate(tool_call.name, tool_call.arguments):
+            denial_text = "Permission denied: the user (or the current permission mode) did not approve this action."
+            self._emit(_ToolCallEndEvent(name=tool_call.name, is_error=True, result_text=denial_text, details=None))
+            self._messages.append(
+                ToolResultMessage(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    content=[TextContent(text=denial_text)],
+                    details=None,
+                    is_error=True,
+                    timestamp=int(time.time() * 1000),
+                )
+            )
+            return
+
+        result, is_error, details = await self._execute_tool_call(tool_call)
+        tool_content: list[TextContent | ImageContent] = [
+            TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"
+        ]
+
+        if self._extension_runner is not None:
+            result_event = ToolResultEvent(
+                tool_call_id=tool_call.id, tool_name=tool_call.name, content=tool_content, is_error=is_error
+            )
+            override = await self._extension_runner.emit_tool_result(result_event)
+            if override is not None:
+                if override.content is not None:
+                    tool_content = override.content
+                if override.is_error is not None:
+                    is_error = override.is_error
+
+        result_text = "".join(b.text for b in tool_content if isinstance(b, TextContent))
+        self._emit(_ToolCallEndEvent(name=tool_call.name, is_error=is_error, result_text=result_text, details=details))
+        self._messages.append(
+            ToolResultMessage(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                content=tool_content,
+                details=details,
+                is_error=is_error,
+                timestamp=int(time.time() * 1000),
+            )
         )
 
     async def _execute_tool_call(
