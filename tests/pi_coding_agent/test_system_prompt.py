@@ -24,6 +24,21 @@ def test_custom_prompt() -> None:
     assert "/tmp" in prompt
 
 
+def test_default_prompt_has_pi_documentation_section() -> None:
+    opts = BuildSystemPromptOptions(cwd="/home/user/project")
+    prompt = build_system_prompt(opts)
+    assert "\nGuidelines:\n" in prompt
+    assert "Pi documentation (read only" in prompt
+    assert "extensions.md" in prompt
+    assert "hello.py" in prompt
+
+
+def test_custom_prompt_has_no_pi_documentation_section() -> None:
+    opts = BuildSystemPromptOptions(custom_prompt="You are a code reviewer.", cwd="/tmp")
+    prompt = build_system_prompt(opts)
+    assert "Pi documentation" not in prompt
+
+
 def test_append_system_prompt() -> None:
     opts = BuildSystemPromptOptions(
         cwd="/tmp",
@@ -102,3 +117,12 @@ def test_custom_prompt_skips_contract_guideline() -> None:
     """Subagent personas (custom_prompt) keep their own scope — no injected guideline."""
     prompt = build_system_prompt(BuildSystemPromptOptions(custom_prompt="You are a scout.", cwd="/tmp"))
     assert "literal contract" not in prompt
+
+
+def test_referenced_docs_and_example_paths_actually_exist() -> None:
+    """The paths the system prompt tells the model to read must be real —
+    a broken path here means the model gets sent to read nothing."""
+    from pi_coding_agent.config import get_docs_path, get_examples_path
+
+    assert (get_docs_path() / "extensions.md").is_file()
+    assert (get_examples_path() / "extensions" / "hello.py").is_file()

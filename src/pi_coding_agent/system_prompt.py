@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pi_coding_agent.config import get_docs_path, get_examples_path
+
 
 @dataclass
 class BuildSystemPromptOptions:
@@ -113,6 +115,8 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         )
 
     guidelines = "\n".join(f"- {g}" for g in guidelines_list)
+    docs_path = get_docs_path()
+    examples_path = get_examples_path()
 
     prompt = (
         "You are an expert coding assistant operating inside pi, a coding agent harness."
@@ -121,7 +125,13 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         f"Available tools:\n{tools_list}\n\n"
         "In addition to the tools above, you may have access to other custom tools"
         " depending on the project.\n\n"
-        f"Guidelines:\n{guidelines}"
+        f"Guidelines:\n{guidelines}\n\n"
+        "Pi documentation (read only when the user asks about pi itself, its SDK, or extensions):\n"
+        f"- Extension authoring guide: {docs_path / 'extensions.md'}\n"
+        f"- Example extension: {examples_path / 'extensions' / 'hello.py'}\n"
+        "- When asked to write a Pi extension, read the extension authoring guide and the example "
+        "extension first, then follow their conventions exactly (entry point name, AgentTool shape, "
+        "the .pi/extensions/ directory convention) rather than guessing the API."
     )
 
     if append_section:

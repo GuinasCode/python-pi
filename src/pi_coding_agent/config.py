@@ -43,6 +43,19 @@ def get_package_dir() -> Path:
     return Path(__file__).parent.parent.parent
 
 
+def get_docs_path() -> Path:
+    """Directory of bundled pi documentation (referenced from the system
+    prompt's "Pi documentation" section). Resolved relative to this
+    installed package, not the dev-checkout repo root, so it works the
+    same whether running from a git clone or a pip/uv install."""
+    return Path(__file__).resolve().parent / "docs"
+
+
+def get_examples_path() -> Path:
+    """Directory of bundled pi examples (extensions, custom tools, ...)."""
+    return Path(__file__).resolve().parent / "examples"
+
+
 def detect_install_method() -> InstallMethod:
     """Detect how Pi was installed."""
     if os.environ.get("UV_TOOL_BIN_DIR") or os.environ.get("VIRTUAL_ENV"):
