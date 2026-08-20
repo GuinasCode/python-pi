@@ -21,8 +21,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         import pytest
     except ImportError:
         print(
-            "pi-evals requires the eval extra: install with `pip install python-pi[eval]` "
-            "(or `uv sync --extra eval`).",
+            "pi-evals requires the eval extra: install with `pip install python-pi[eval]` (or `uv sync --extra eval`).",
             file=sys.stderr,
         )
         return 1

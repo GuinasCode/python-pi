@@ -47,9 +47,7 @@ def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
         loop = asyncio.get_running_loop()
 
         if merge_id is not None:
-            record = await loop.run_in_executor(
-                None, lambda: store.update(int(merge_id), title=title, content=content)
-            )
+            record = await loop.run_in_executor(None, lambda: store.update(int(merge_id), title=title, content=content))
             if record is None:
                 return _ok(f"No memory with id {merge_id} found to merge into.")
             return _ok(f"Merged into [{record.type.value}] #{record.id} {record.title}")

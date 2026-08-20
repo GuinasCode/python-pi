@@ -158,9 +158,7 @@ class TestNoTools:
         from pi_ai import Tool
 
         custom = [Tool(name="custom", description="d", parameters={})]
-        session, _ = _setup_faux(
-            [faux_assistant_message("hi")], tools=custom, no_tools=True, enable_subagents=False
-        )
+        session, _ = _setup_faux([faux_assistant_message("hi")], tools=custom, no_tools=True, enable_subagents=False)
         assert session.get_active_tool_names() == ["custom"]
 
 

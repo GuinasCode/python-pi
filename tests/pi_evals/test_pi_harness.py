@@ -52,9 +52,7 @@ class TestToTranscriptEvents:
     def test_normalizes_user_assistant_tool_messages(self) -> None:
         messages: list[Message] = [
             UserMessage(content="hi"),
-            AssistantMessage(
-                content=[TextContent(text="ok"), ToolCall(id="t1", name="read", arguments={"path": "x"})]
-            ),
+            AssistantMessage(content=[TextContent(text="ok"), ToolCall(id="t1", name="read", arguments={"path": "x"})]),
             ToolResultMessage(tool_call_id="t1", tool_name="read", content=[TextContent(text="file contents")]),
         ]
         events = _to_transcript_events(messages)
@@ -67,9 +65,7 @@ class TestToTranscriptEvents:
 
     def test_tool_error_includes_error_field(self) -> None:
         messages: list[Message] = [
-            ToolResultMessage(
-                tool_call_id="t1", tool_name="bash", content=[TextContent(text="boom")], is_error=True
-            )
+            ToolResultMessage(tool_call_id="t1", tool_name="bash", content=[TextContent(text="boom")], is_error=True)
         ]
         events = _to_transcript_events(messages)
         assert events[0]["error"] == {"message": "boom"}
