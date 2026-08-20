@@ -8,6 +8,7 @@ adapter, :mod:`pi_evals.judges` for LLM-as-judge scoring, and
 
 from __future__ import annotations
 
+from pi_evals.artifacts import DEFAULT_EVAL_DIR, EvalArtifactWriter, RunRecord
 from pi_evals.harness_table import (
     CandidateLift,
     HarnessTableRow,
@@ -27,7 +28,9 @@ from pi_evals.pi_harness import (
 )
 
 __all__ = [
+    "DEFAULT_EVAL_DIR",
     "CandidateLift",
+    "EvalArtifactWriter",
     "HarnessTableRow",
     "Judge",
     "JudgeScore",
@@ -36,6 +39,7 @@ __all__ = [
     "PiEvalInput",
     "PiHarnessResult",
     "PiHarnessUsage",
+    "RunRecord",
     "compute_pass_rate_lift",
     "create_judge",
     "create_pi_coding_agent_harness",
