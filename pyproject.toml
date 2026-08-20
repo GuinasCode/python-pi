@@ -40,6 +40,7 @@ dev = [
 
 [project.scripts]
 pi = "pi_coding_agent.cli:main"
+pi-evals = "pi_evals.cli:main"
 
 [build-system]
 requires = ["hatchling==1.28.0"]
