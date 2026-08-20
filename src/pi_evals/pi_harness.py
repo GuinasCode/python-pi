@@ -323,6 +323,7 @@ def create_pi_coding_agent_harness(
     no_tools: bool | list[str] = False,
     transform_system_prompt: Callable[[str], str] | None = None,
     output: Callable[[str, AgentSession], Any | Awaitable[Any]] | None = None,
+    enable_extensions: bool = False,
 ) -> PiCodingAgentHarness:
     """Create a :class:`PiCodingAgentHarness` — mirrors ``createPiCodingAgentHarness`` in pi-harness.ts."""
     return PiCodingAgentHarness(
@@ -332,5 +333,6 @@ def create_pi_coding_agent_harness(
             no_tools=no_tools,
             transform_system_prompt=transform_system_prompt,
             output=output,
+            enable_extensions=enable_extensions,
         )
     )
