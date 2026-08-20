@@ -199,3 +199,33 @@ class TestPiCodingAgentHarnessRun:
 
         after = {p.name for p in Path(tempfile.gettempdir()).glob("pi-eval-*")}
         assert after == before
+
+    def test_enable_extensions_false_means_no_extension_runner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        models, model = _faux_models_and_model()
+        monkeypatch.setattr(pi_harness, "_resolve_models", lambda provider, model_id: (models, model))
+
+        harness = PiCodingAgentHarness(
+            PiCodingAgentHarnessOptions(
+                model=("faux", "faux-1"),
+                output=lambda _response, session: session.get_extension_paths(),
+            )
+        )
+        result = asyncio.run(harness.run("hello"))
+        assert result.output == []
+
+    def test_enable_extensions_true_wires_a_runner_into_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        models, model = _faux_models_and_model()
+        monkeypatch.setattr(pi_harness, "_resolve_models", lambda provider, model_id: (models, model))
+
+        harness = PiCodingAgentHarness(
+            PiCodingAgentHarnessOptions(
+                model=("faux", "faux-1"),
+                enable_extensions=True,
+                output=lambda _response, session: session.get_extensions(),
+            )
+        )
+        result = asyncio.run(harness.run("hello"))
+        # No extension files exist in the throwaway cwd, so an empty (not
+        # None/error-raising) result confirms the runner is really wired in.
+        assert result.output.extensions == []
+        assert result.output.errors == []

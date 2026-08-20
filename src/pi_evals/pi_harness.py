@@ -40,6 +40,7 @@ from pi_ai import (
 from pi_ai.models import MutableModels
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
+from pi_coding_agent.extensions import ExtensionRunner
 
 __all__ = [
     "PiCodingAgentHarness",
@@ -100,6 +101,11 @@ class PiCodingAgentHarnessOptions:
     no_tools: bool | list[str] = False
     transform_system_prompt: Callable[[str], str] | None = None
     output: Callable[[str, AgentSession], Any | Awaitable[Any]] | None = None
+    # When True, an ExtensionRunner is wired in for this run's isolated
+    # cwd/agent_dir — needed for evals that create/use a .pi/extensions/
+    # extension mid-run (e.g. extensions.eval.ts). Off by default since most
+    # harnesses don't touch extensions and loading is pure overhead for them.
+    enable_extensions: bool = False
 
 
 def resolve_model_selection(
@@ -232,6 +238,7 @@ async def _run_pi_coding_agent(pi_input: PiEvalInput, options: PiCodingAgentHarn
     agent_dir.mkdir()
 
     try:
+        extension_runner = ExtensionRunner(cwd, agent_dir) if options.enable_extensions else None
         session = AgentSession(
             AgentSessionOptions(
                 models=models,
@@ -241,6 +248,7 @@ async def _run_pi_coding_agent(pi_input: PiEvalInput, options: PiCodingAgentHarn
                 no_tools=options.no_tools,
                 enable_subagents=False,
                 interactive=False,
+                extension_runner=extension_runner,
             )
         )
         # Note: unlike the TS harness, AgentSession doesn't consume a
