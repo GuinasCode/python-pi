@@ -8,6 +8,13 @@ adapter, :mod:`pi_evals.judges` for LLM-as-judge scoring, and
 
 from __future__ import annotations
 
+from pi_evals.harness_table import (
+    CandidateLift,
+    HarnessTableRow,
+    compute_pass_rate_lift,
+    harness_table,
+    passed_from_score,
+)
 from pi_evals.judges import Judge, JudgeScore, create_judge
 from pi_evals.pi_harness import (
     PiCodingAgentHarness,
@@ -20,6 +27,8 @@ from pi_evals.pi_harness import (
 )
 
 __all__ = [
+    "CandidateLift",
+    "HarnessTableRow",
     "Judge",
     "JudgeScore",
     "PiCodingAgentHarness",
@@ -27,7 +36,10 @@ __all__ = [
     "PiEvalInput",
     "PiHarnessResult",
     "PiHarnessUsage",
+    "compute_pass_rate_lift",
     "create_judge",
     "create_pi_coding_agent_harness",
+    "harness_table",
+    "passed_from_score",
     "resolve_model_selection",
 ]
