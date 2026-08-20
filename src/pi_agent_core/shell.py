@@ -9,6 +9,7 @@ semantics stay consistent across platforms.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 from functools import lru_cache
@@ -22,13 +23,19 @@ def _is_wsl_launcher_stub(path: str, system_root: str) -> bool:
     immediately with "no distributions installed" — and since it's a valid
     PATH hit, ``shutil.which("bash")`` happily returns it ahead of (or
     instead of) Git Bash. Reject anything living under SystemRoot.
+
+    *path*/*system_root* are always Windows-style strings (this only ever
+    runs for real from resolve_posix_shell's ``os.name == "nt"`` branch) —
+    normalized with ``ntpath`` explicitly rather than ``os.path``, so the
+    logic (and its tests) are correct regardless of the host OS this
+    actually executes on, not just when the host happens to be Windows.
     """
     try:
-        resolved = os.path.normcase(os.path.abspath(path))
-        root = os.path.normcase(os.path.abspath(system_root))
+        resolved = ntpath.normcase(ntpath.abspath(path))
+        root = ntpath.normcase(ntpath.abspath(system_root))
     except OSError:
         return False
-    return resolved == root or resolved.startswith(root + os.sep)
+    return resolved == root or resolved.startswith(root + ntpath.sep)
 
 
 @lru_cache(maxsize=1)
