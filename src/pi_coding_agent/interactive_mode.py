@@ -388,6 +388,29 @@ class InteractiveSession:
     # Rich event display
     # ------------------------------------------------------------------
 
+    def _render_entry(self, tool_name: str, phase: str, event: dict[str, Any]) -> bool:
+        """Phase G: if an extension registered an entry renderer for
+        `tool_name`, render its "start"/"end" transcript line through it
+        instead of the default. Returns True if it handled rendering
+        (whether or not it actually printed anything — a renderer that
+        returns None still falls through to the caller's default, but one
+        that returns "" is a deliberate no-op the caller must not
+        double-render), False if no renderer is registered for this tool."""
+        renderer = self._agent_session.get_extension_entry_renderer(tool_name)
+        if renderer is None:
+            return False
+        from pi_coding_agent.extensions.events import ExtensionContext
+
+        rendered = renderer(phase, event, ExtensionContext(cwd=self._cwd))
+        if rendered is None:
+            return False
+        if isinstance(rendered, str):
+            if rendered:
+                self._output.print(rendered)
+        else:
+            self._output.print_renderable(rendered)
+        return True
+
     def _flush_text_block(self) -> None:
         """Render the accumulated text block as left-aligned Markdown and reset."""
         buf = self._text_block_buf
@@ -395,6 +418,20 @@ class InteractiveSession:
         if not buf:
             return
         if buf.strip():
+            from pi_coding_agent.extensions.events import ExtensionContext
+
+            ctx = ExtensionContext(cwd=self._cwd)
+            for transformer in self._agent_session.get_extension_markdown_transformers():
+                buf = transformer(buf, ctx)
+            renderer = self._agent_session.get_extension_message_renderer("assistant")
+            if renderer is not None:
+                rendered = renderer(buf, ctx)
+                if rendered is not None:
+                    if isinstance(rendered, str):
+                        self._output.print(rendered)
+                    else:
+                        self._output.print_renderable(rendered)
+                    return
             self._output.print_renderable(Markdown(buf))
         else:
             self._output.print(buf)
@@ -440,7 +477,8 @@ class InteractiveSession:
             args = getattr(event, "args", {}) or {}
             args_str = _fmt_args(args)
             self._status = f"running: {name}"
-            self._output.print(f"[{PASTEL_YELLOW}]~[/{PASTEL_YELLOW}] [bold]{escape(name)}[/bold]({args_str})")
+            if not self._render_entry(name, "start", {"args": args}):
+                self._output.print(f"[{PASTEL_YELLOW}]~[/{PASTEL_YELLOW}] [bold]{escape(name)}[/bold]({args_str})")
 
         elif t == "tool_call_end":
             name = getattr(event, "name", "")
@@ -448,16 +486,17 @@ class InteractiveSession:
             result_text = getattr(event, "result_text", "")
             details = getattr(event, "details", None)
             self._status = "thinking..."
-            icon_style = PASTEL_RED if is_error else PASTEL_GREEN
-            icon = "!" if is_error else "+"
-            self._output.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
-            diff = (details or {}).get("diff") if isinstance(details, dict) else None
-            if diff:
-                self._output.print_renderable(render_diff(diff))
-            else:
-                preview = _fmt_result_preview(result_text)
-                if preview:
-                    self._output.print(preview)
+            if not self._render_entry(name, "end", {"result_text": result_text, "is_error": is_error}):
+                icon_style = PASTEL_RED if is_error else PASTEL_GREEN
+                icon = "!" if is_error else "+"
+                self._output.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
+                diff = (details or {}).get("diff") if isinstance(details, dict) else None
+                if diff:
+                    self._output.print_renderable(render_diff(diff))
+                else:
+                    preview = _fmt_result_preview(result_text)
+                    if preview:
+                        self._output.print(preview)
 
         # ── one-time local memory embedding model download ──────────────
         elif t == "memory_download":

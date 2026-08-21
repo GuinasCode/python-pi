@@ -29,9 +29,12 @@ from pi_ai import (
 )
 from pi_ai.models import MutableModels
 from pi_coding_agent.extensions import (
+    EntryRenderer,
     ExtensionFlag,
     ExtensionRunner,
     LoadExtensionsResult,
+    MarkdownTransformer,
+    MessageRenderer,
     RegisteredCommand,
     RegisteredShortcut,
     RegisteredTheme,
@@ -399,6 +402,25 @@ class AgentSession:
         if self._extension_runner is None:
             return []
         return self._extension_runner.get_themes()
+
+    def get_extension_markdown_transformers(self) -> list[MarkdownTransformer]:
+        """Every markdown transformer registered by a loaded extension, in
+        load order."""
+        if self._extension_runner is None:
+            return []
+        return self._extension_runner.get_markdown_transformers()
+
+    def get_extension_message_renderer(self, role: str) -> MessageRenderer | None:
+        """The message renderer registered for `role`, if any."""
+        if self._extension_runner is None:
+            return None
+        return self._extension_runner.get_message_renderer(role)
+
+    def get_extension_entry_renderer(self, tool_name: str) -> EntryRenderer | None:
+        """The entry renderer registered for `tool_name`, if any."""
+        if self._extension_runner is None:
+            return None
+        return self._extension_runner.get_entry_renderer(tool_name)
 
     def get_extension_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by a loaded extension."""

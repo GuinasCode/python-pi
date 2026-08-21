@@ -23,6 +23,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from rich.console import RenderableType
+
 from pi_agent_core.types import AgentTool
 from pi_ai.models import MutableModels, Provider
 from pi_coding_agent.extensions.events import ExtensionContext, ExtensionHandler
@@ -31,6 +33,14 @@ ExtensionFactory = Callable[["ExtensionAPI"], Any]
 
 CommandHandler = Callable[[str, ExtensionContext], "Any | Awaitable[Any]"]
 ShortcutHandler = Callable[[ExtensionContext], "Any | Awaitable[Any]"]
+
+# Phase G rendering hooks are deliberately synchronous-only (unlike
+# command/shortcut handlers, which may be async): they run inline while a
+# message is already being printed/streamed, not from a point where
+# awaiting one makes sense.
+MarkdownTransformer = Callable[[str, ExtensionContext], str]
+MessageRenderer = Callable[[str, ExtensionContext], "RenderableType | str | None"]
+EntryRenderer = Callable[[str, dict[str, Any], ExtensionContext], "RenderableType | str | None"]
 
 
 @dataclass
@@ -116,6 +126,9 @@ class LoadedExtension:
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
     shortcuts: list[RegisteredShortcut] = field(default_factory=list)
     themes: list[RegisteredTheme] = field(default_factory=list)
+    markdown_transformers: list[MarkdownTransformer] = field(default_factory=list)
+    message_renderers: dict[str, MessageRenderer] = field(default_factory=dict)
+    entry_renderers: dict[str, EntryRenderer] = field(default_factory=dict)
 
     @property
     def tool_names(self) -> list[str]:
@@ -131,12 +144,13 @@ class LoadExtensionsResult:
 class ExtensionAPI:
     """The ``pi`` object passed to an extension's entry point.
 
-    Phase A/B/D/E/F/T3 surface: tool registration, event subscription,
-    command registration, shortcut registration, flag declaration/reading,
-    and provider registration. Rendering hooks (custom renderers, dialogs,
-    widgets, autocomplete providers) are not implemented yet — see
-    ARCHITECTURE.md's extension-system status note (Phase H needs the rest
-    of the Textual UI foundation, T4-T6, first).
+    Phase A/B/D/E/F/T3/G surface: tool registration, event subscription,
+    command registration, shortcut/theme registration, rendering hooks
+    (markdown transformers, message/entry renderers), flag
+    declaration/reading, and provider registration. Dialogs, widgets, and
+    autocomplete *providers* (the extension-facing API — the popup
+    mechanism itself is done, Phase T4) are not implemented yet — see
+    ARCHITECTURE.md's extension-system status note (Phase H).
     """
 
     def __init__(
@@ -149,6 +163,9 @@ class ExtensionAPI:
         self._commands: list[RegisteredCommand] = []
         self._shortcuts: list[RegisteredShortcut] = []
         self._themes: list[RegisteredTheme] = []
+        self._markdown_transformers: list[MarkdownTransformer] = []
+        self._message_renderers: dict[str, MessageRenderer] = {}
+        self._entry_renderers: dict[str, EntryRenderer] = {}
         self._flags: dict[str, ExtensionFlag] = {}
         # Shared with the owning ExtensionRunner (same dict object, not a
         # copy) so pi.get_flag() sees values the runner sets *after* this
@@ -252,6 +269,44 @@ class ExtensionAPI:
     @property
     def themes(self) -> list[RegisteredTheme]:
         return list(self._themes)
+
+    def register_markdown_transformer(self, transformer: MarkdownTransformer) -> None:
+        """Register a text transform run on assistant text right before it's
+        rendered as Markdown. ``transformer(text, ctx) -> text``. Chained in
+        registration order across every extension — each sees the previous
+        transformer's output, not the original text."""
+        self._markdown_transformers.append(transformer)
+
+    @property
+    def markdown_transformers(self) -> list[MarkdownTransformer]:
+        return list(self._markdown_transformers)
+
+    def register_message_renderer(self, role: str, renderer: MessageRenderer) -> None:
+        """Register a custom renderer for a message role (``"assistant"`` is
+        the only role actually flushed through one today — see
+        InteractiveSession._flush_text_block). ``renderer(text, ctx)``
+        returning a Rich renderable or string replaces the default Markdown
+        rendering entirely; returning ``None`` falls through to it. A later
+        registration for the same role replaces an earlier one."""
+        self._message_renderers[role] = renderer
+
+    @property
+    def message_renderers(self) -> dict[str, MessageRenderer]:
+        return dict(self._message_renderers)
+
+    def register_entry_renderer(self, tool_name: str, renderer: EntryRenderer) -> None:
+        """Register a custom renderer for a specific tool's transcript
+        entries. ``renderer(phase, event, ctx)`` — ``phase`` is
+        ``"start"``/``"end"``, ``event`` is a plain dict (``args`` for
+        start; ``result_text``/``is_error`` for end) — returning a Rich
+        renderable or string replaces the default line for that phase;
+        returning ``None`` falls through to it. A later registration for
+        the same tool name replaces an earlier one."""
+        self._entry_renderers[tool_name] = renderer
+
+    @property
+    def entry_renderers(self) -> dict[str, EntryRenderer]:
+        return dict(self._entry_renderers)
 
     def register_flag(
         self,

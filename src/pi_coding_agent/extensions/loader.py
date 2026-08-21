@@ -214,6 +214,9 @@ def load_extensions(
                 commands=api.commands,
                 shortcuts=api.shortcuts,
                 themes=api.themes,
+                markdown_transformers=api.markdown_transformers,
+                message_renderers=api.message_renderers,
+                entry_renderers=api.entry_renderers,
                 flags=api.flags,
             )
         )

@@ -37,6 +37,24 @@ def extension(pi):
     pi.register_theme("midnight", primary="#1e1e2e", dark=True)
 """
 
+_RENDERING_EXTENSION = """
+def _shout(text, ctx):
+    return text.upper()
+
+def _render_assistant(text, ctx):
+    return f"custom: {text}"
+
+def _render_greet(phase, event, ctx):
+    if phase == "start":
+        return f"starting greet with {event['args']}"
+    return f"finished greet: {event['result_text']}"
+
+def extension(pi):
+    pi.register_markdown_transformer(_shout)
+    pi.register_message_renderer("assistant", _render_assistant)
+    pi.register_entry_renderer("greet", _render_greet)
+"""
+
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +96,36 @@ class TestExtensionAPIThemes:
         assert api.themes[0].name == "midnight"
         assert api.themes[0].primary == "#1e1e2e"
         assert api.themes[0].dark is True
+
+
+class TestExtensionAPIRenderingHooks:
+    def test_register_markdown_transformer_is_collected(self) -> None:
+        api = ExtensionAPI()
+
+        def transform(text: str, _ctx: ExtensionContext) -> str:
+            return text.upper()
+
+        api.register_markdown_transformer(transform)
+        assert len(api.markdown_transformers) == 1
+        assert api.markdown_transformers[0]("hi", ExtensionContext(cwd=".")) == "HI"
+
+    def test_register_message_renderer_is_collected(self) -> None:
+        api = ExtensionAPI()
+
+        def render(text: str, _ctx: ExtensionContext) -> str:
+            return f"custom: {text}"
+
+        api.register_message_renderer("assistant", render)
+        assert "assistant" in api.message_renderers
+
+    def test_register_entry_renderer_is_collected(self) -> None:
+        api = ExtensionAPI()
+
+        def render(_phase: str, _event: dict[str, object], _ctx: ExtensionContext) -> str:
+            return "handled"
+
+        api.register_entry_renderer("greet", render)
+        assert "greet" in api.entry_renderers
 
 
 class TestExtensionAPIFlags:
@@ -186,6 +234,55 @@ class TestExtensionRunnerThemes:
         runner = ExtensionRunner(tmp_path, tmp_path / "agent")
         runner.load()
         assert runner.get_themes() == []
+
+
+class TestLoaderCapturesRenderingHooks:
+    def test_rendering_extension_is_captured(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "rendering.py", _RENDERING_EXTENSION)
+        api = ExtensionAPI()
+        error = load_extension_from_path(path, api)
+        assert error is None
+        assert len(api.markdown_transformers) == 1
+        assert "assistant" in api.message_renderers
+        assert "greet" in api.entry_renderers
+
+
+class TestExtensionRunnerRenderingHooks:
+    def test_get_markdown_transformers_aggregates_in_load_order(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "rendering.py", _RENDERING_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        transformers = runner.get_markdown_transformers()
+        assert len(transformers) == 1
+        assert transformers[0]("hi", ExtensionContext(cwd=str(tmp_path))) == "HI"
+
+    def test_get_message_renderer_returns_registered_renderer(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "rendering.py", _RENDERING_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        renderer = runner.get_message_renderer("assistant")
+        assert renderer is not None
+        assert renderer("hi", ExtensionContext(cwd=str(tmp_path))) == "custom: hi"
+
+    def test_get_message_renderer_returns_none_when_unregistered(self, tmp_path: Path) -> None:
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        assert runner.get_message_renderer("assistant") is None
+
+    def test_get_entry_renderer_returns_registered_renderer(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "rendering.py", _RENDERING_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        renderer = runner.get_entry_renderer("greet")
+        assert renderer is not None
+        ctx = ExtensionContext(cwd=str(tmp_path))
+        assert renderer("start", {"args": {"name": "Bob"}}, ctx) == "starting greet with {'name': 'Bob'}"
+
+    def test_get_entry_renderer_returns_none_for_other_tools(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "rendering.py", _RENDERING_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        assert runner.get_entry_renderer("bash") is None
 
 
 class TestExtensionRunnerCommandsAndFlags:

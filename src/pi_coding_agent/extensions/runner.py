@@ -28,9 +28,12 @@ from pi_coding_agent.extensions.events import (
 )
 from pi_coding_agent.extensions.loader import discover_extension_paths, load_extensions
 from pi_coding_agent.extensions.types import (
+    EntryRenderer,
     ExtensionError,
     ExtensionFlag,
     LoadExtensionsResult,
+    MarkdownTransformer,
+    MessageRenderer,
     RegisteredCommand,
     RegisteredShortcut,
     RegisteredTheme,
@@ -98,6 +101,30 @@ class ExtensionRunner:
         """Every color theme registered by every successfully loaded
         extension, in load order."""
         return [theme for ext in self._result.extensions for theme in ext.themes]
+
+    def get_markdown_transformers(self) -> list[MarkdownTransformer]:
+        """Every markdown transformer registered by every successfully
+        loaded extension, in load order — applied in that order, each
+        seeing the previous one's output."""
+        return [t for ext in self._result.extensions for t in ext.markdown_transformers]
+
+    def get_message_renderer(self, role: str) -> MessageRenderer | None:
+        """The message renderer registered for `role`, if any — the last
+        loaded extension to register one for this role wins."""
+        renderer: MessageRenderer | None = None
+        for ext in self._result.extensions:
+            if role in ext.message_renderers:
+                renderer = ext.message_renderers[role]
+        return renderer
+
+    def get_entry_renderer(self, tool_name: str) -> EntryRenderer | None:
+        """The entry renderer registered for `tool_name`, if any — the last
+        loaded extension to register one for this tool wins."""
+        renderer: EntryRenderer | None = None
+        for ext in self._result.extensions:
+            if tool_name in ext.entry_renderers:
+                renderer = ext.entry_renderers[tool_name]
+        return renderer
 
     def get_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by every successfully loaded extension,

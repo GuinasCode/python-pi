@@ -12,18 +12,22 @@ from pi_coding_agent.extensions.loader import (
 )
 from pi_coding_agent.extensions.runner import ExtensionRunner
 from pi_coding_agent.extensions.types import (
+    EntryRenderer,
     ExtensionAPI,
     ExtensionError,
     ExtensionFactory,
     ExtensionFlag,
     LoadedExtension,
     LoadExtensionsResult,
+    MarkdownTransformer,
+    MessageRenderer,
     RegisteredCommand,
     RegisteredShortcut,
     RegisteredTheme,
 )
 
 __all__ = [
+    "EntryRenderer",
     "ExtensionAPI",
     "ExtensionError",
     "ExtensionFactory",
@@ -31,6 +35,8 @@ __all__ = [
     "ExtensionRunner",
     "LoadExtensionsResult",
     "LoadedExtension",
+    "MarkdownTransformer",
+    "MessageRenderer",
     "RegisteredCommand",
     "RegisteredShortcut",
     "RegisteredTheme",

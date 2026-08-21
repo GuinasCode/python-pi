@@ -24,7 +24,12 @@ reporting); the "Pi documentation" system-prompt section pointing at a bundled a
 guide + example; the event bus (`tool_call`/`tool_result`/agent+turn+session lifecycle —
 the highest-leverage subset of the original's 30+ event types, not all of them);
 `register_command`/`register_flag`+`get_flag`; `register_provider`/`unregister_provider`;
-`register_shortcut` (Textual-app only — see below).
+`register_shortcut`/`register_theme` (Textual-app only — see below); Phase G's rendering
+hooks — `register_markdown_transformer`, `register_message_renderer`,
+`register_entry_renderer` — wired into `InteractiveSession._flush_text_block`/`_handle_event`
+directly, so unlike the Textual-only items above these work in *both* front-ends (the classic
+REPL and the Textual app alike), since they transform/replace what gets printed rather than
+being chrome specific to one UI.
 See the README's Extensions section for usage.
 
 The Textual app (`--ui-mode fullscreen`/`--alt`, `pi_coding_agent/tui_app.py`) is built up in
@@ -51,19 +56,18 @@ in Phase H alongside `ExtensionUIContext.setHeader`/`setWidget` instead, once th
 caller.
 
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets, custom
-  autocomplete providers wired to `pi.addAutocompleteProvider`, custom editors, custom
-  header/footer/widget slots) and the interactive TUI's own extension management components
-  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phase G
-  (rendering hooks) then H (`ExtensionUIContext`) of the Textual-app work described above,
-  once each has a concrete Textual mechanism to sit on (T2's
-  `ModalScreen` pattern already covers dialogs; T3's dispatcher already covers shortcuts; T4's
-  popup already covers the autocomplete *mechanism*, extension-supplied providers are a Phase
-  H wiring exercise on top of it; T5's registration already covers themes, a Phase H
-  `setTheme`/`getTheme` is just `app.theme = name` on top of it). The classic REPL
-  (`interactive_mode.py`'s
-  `rich.console.Console` loop) stays untouched and is not getting this treatment — these
-  hooks are Textual-app-only, same as `register_shortcut`.
+- Dialogs/widgets beyond `ConfirmDialog`, custom autocomplete providers wired to
+  `pi.addAutocompleteProvider`, custom editors, custom header/footer/widget slots, and the
+  interactive TUI's own extension management components
+  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phase H
+  (`ExtensionUIContext`) of the Textual-app work described above, once each has a concrete
+  Textual mechanism to sit on (T2's `ModalScreen` pattern already covers dialogs; T3's
+  dispatcher already covers shortcuts; T4's popup already covers the autocomplete
+  *mechanism*, extension-supplied providers are a Phase H wiring exercise on top of it; T5's
+  registration already covers themes, a Phase H `setTheme`/`getTheme` is just
+  `app.theme = name` on top of it). The classic REPL (`interactive_mode.py`'s
+  `rich.console.Console` loop) stays untouched for these — this remaining set is genuinely
+  Textual-app UI chrome, unlike Phase G's rendering hooks above (which apply to both).
 
 ## Scope Reality Check
 

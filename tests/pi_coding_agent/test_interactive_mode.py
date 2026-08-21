@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from pi_ai.models import MutableModels
@@ -196,3 +197,64 @@ class TestExtensionsIntegration:
     def test_unregistered_command_still_falls_through_to_unknown(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path)
         assert asyncio.run(session._handle_command("/not_a_real_command")) is True
+
+
+_RENDERING_EXTENSION = """
+def _shout(text, ctx):
+    return text.upper()
+
+def extension(pi):
+    pi.register_markdown_transformer(_shout)
+"""
+
+_ENTRY_RENDERING_EXTENSION = """
+def _render_write(phase, event, ctx):
+    if phase == "start":
+        return "[custom] starting write"
+    return "[custom] write done"
+
+def extension(pi):
+    pi.register_entry_renderer("write", _render_write)
+"""
+
+
+class TestRenderingHooksIntegration:
+    def test_markdown_transformer_runs_before_rendering(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "rendering.py").write_text(_RENDERING_EXTENSION, encoding="utf-8")
+
+        session = _make_session(tmp_path)
+        printed: list[object] = []
+
+        def _record_renderable(renderable: object) -> None:
+            printed.append(renderable)
+
+        session._output.print_renderable = _record_renderable  # type: ignore[method-assign]
+        session._text_block_buf = "hello world"
+        session._flush_text_block()
+        # Markdown's __str__ is its repr, not its source — check .markup
+        # (the actual text passed to Markdown()) instead, matching how
+        # test_tui_app.py's _transcript_text() helper avoids the same trap.
+        assert any(getattr(r, "markup", None) == "HELLO WORLD" for r in printed)
+
+    def test_entry_renderer_replaces_default_tool_call_rendering(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "rendering.py").write_text(_ENTRY_RENDERING_EXTENSION, encoding="utf-8")
+
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+
+        def _record_print(markup: str = "", *, end: str = "\n") -> None:
+            printed.append(markup)
+
+        session._output.print = _record_print  # type: ignore[method-assign]
+
+        class _Event:
+            type = "tool_call_start"
+            name = "write"
+            args: ClassVar[dict[str, object]] = {}
+
+        session._handle_event(_Event())
+        assert printed == ["[custom] starting write"]
