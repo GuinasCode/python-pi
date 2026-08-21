@@ -41,6 +41,7 @@ from textual.widgets import OptionList, Static
 from pi_ai import StopReason
 from pi_coding_agent.autocomplete import command_suggestions
 from pi_coding_agent.dialogs import ConfirmDialog, InputDialog, SelectDialog
+from pi_coding_agent.extension_ui import AutocompleteProvider
 from pi_coding_agent.interactive_mode import InteractiveSession, _fmt_args
 from pi_coding_agent.permission_mode import permission_mode_label
 from pi_coding_agent.prompt_editor import PromptTextArea
@@ -92,6 +93,7 @@ class TextualExtensionUIContext:
 
     def __init__(self, app: PiApp) -> None:
         self._app = app
+        self._tools_expanded = True
 
     async def select(self, message: str, choices: list[str]) -> str | None:
         return await self._app.push_screen_wait(SelectDialog(message, choices))
@@ -117,6 +119,21 @@ class TextualExtensionUIContext:
 
     def set_widget(self, content: RenderableType | str | None) -> None:
         self._app._set_slot("#ext-widget", content)
+
+    def get_theme(self) -> str | None:
+        return self._app.theme
+
+    def set_theme(self, name: str) -> None:
+        self._app.theme = name
+
+    def get_tools_expanded(self) -> bool:
+        return self._tools_expanded
+
+    def set_tools_expanded(self, expanded: bool) -> None:
+        self._tools_expanded = expanded
+
+    def add_autocomplete_provider(self, provider: AutocompleteProvider) -> None:
+        self._app._autocomplete_providers.append(provider)
 
 
 class PiApp(App[None]):
@@ -179,6 +196,7 @@ class PiApp(App[None]):
     def __init__(self, session: InteractiveSession) -> None:
         super().__init__()
         self._session = session
+        self._autocomplete_providers: list[AutocompleteProvider] = []
 
     def compose(self) -> ComposeResult:
         yield Static(id="ext-header")
@@ -244,12 +262,20 @@ class PiApp(App[None]):
         self._update_footer()
 
     def on_text_area_changed(self, event: PromptTextArea.Changed) -> None:
-        """Phase T4: recompute the slash-command suggestion popup on every
-        keystroke in the prompt editor."""
+        """Phase T4/H: recompute the suggestion popup on every keystroke in
+        the prompt editor — built-in slash-command matches, plus (Phase H)
+        whatever extra suggestions any ctx.ui.add_autocomplete_provider()
+        callback offers for the current text, merged in and
+        de-duplicated."""
         if event.text_area.id != "prompt-input":
             return
+        text = event.text_area.text
         extension_names = [c.name for c in self._session._agent_session.get_extension_commands()]
-        matches = command_suggestions(event.text_area.text, extension_names)
+        matches = command_suggestions(text, extension_names)
+        for provider in self._autocomplete_providers:
+            for suggestion in provider(text):
+                if suggestion not in matches:
+                    matches.append(suggestion)
         suggestions = self.query_one("#suggestions", OptionList)
         if not matches:
             suggestions.display = False

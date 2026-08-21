@@ -498,13 +498,14 @@ class InteractiveSession:
                 icon_style = PASTEL_RED if is_error else PASTEL_GREEN
                 icon = "!" if is_error else "+"
                 self._output.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
-                diff = (details or {}).get("diff") if isinstance(details, dict) else None
-                if diff:
-                    self._output.print_renderable(render_diff(diff))
-                else:
-                    preview = _fmt_result_preview(result_text)
-                    if preview:
-                        self._output.print(preview)
+                if self._ui_context.get_tools_expanded():
+                    diff = (details or {}).get("diff") if isinstance(details, dict) else None
+                    if diff:
+                        self._output.print_renderable(render_diff(diff))
+                    else:
+                        preview = _fmt_result_preview(result_text)
+                        if preview:
+                            self._output.print(preview)
 
         # ── one-time local memory embedding model download ──────────────
         elif t == "memory_download":

@@ -23,6 +23,20 @@ class TestNoopExtensionUIContext:
     def test_notify_does_not_raise(self) -> None:
         NoopExtensionUIContext().notify("hello")
 
+    def test_theme_getter_setter_do_not_raise_and_get_returns_none(self) -> None:
+        ctx = NoopExtensionUIContext()
+        ctx.set_theme("midnight")
+        assert ctx.get_theme() is None
+
+    def test_tools_expanded_is_real_in_memory_state(self) -> None:
+        ctx = NoopExtensionUIContext()
+        assert ctx.get_tools_expanded() is True
+        ctx.set_tools_expanded(False)
+        assert ctx.get_tools_expanded() is False
+
+    def test_add_autocomplete_provider_does_not_raise(self) -> None:
+        NoopExtensionUIContext().add_autocomplete_provider(lambda text: ["x"])
+
     def test_widget_slot_setters_do_not_raise(self) -> None:
         ctx = NoopExtensionUIContext()
         ctx.set_header("hi")

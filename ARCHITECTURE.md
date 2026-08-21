@@ -66,19 +66,22 @@ toast mechanism directly. Also ported: `set_header`/`set_footer`/`set_title`/`se
 three reserved, hidden-until-set `Static` slots in `PiApp.compose()` (`#ext-header` docked
 top; `#ext-footer` alongside — not replacing — the built-in status footer; `#ext-widget` just
 above the prompt editor) plus `app.title`, all no-ops in the classic REPL the same way the
-prompts above are.
+prompts above are. Also ported: `get_theme`/`set_theme` (thin wrapper over `app.theme` on top
+of T5's registration); `add_autocomplete_provider` (extra suggestions merged into T4's popup
+alongside the built-in slash-command matches); `get_tools_expanded`/`set_tools_expanded`
+(whether a tool-call transcript entry's full result preview prints or just its summary line)
+— unlike every other Phase H method, this one is consulted directly by
+`InteractiveSession._handle_event`, so it's real, working state in the classic REPL too, not
+just the Textual app.
 
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- The rest of `ExtensionUIContext`: `pasteToEditor`/`setEditorText`/`getEditorText`/
-  `setEditorComponent`, `addAutocompleteProvider` (the extension-facing API — T4's popup
-  already covers the mechanism), theme getters/setters (trivial once needed —
-  `app.theme = name` on top of T5's registration), `getToolsExpanded`/`setToolsExpanded`, and
-  the interactive TUI's own extension management components
+- `pasteToEditor`/`setEditorText`/`getEditorText`/`setEditorComponent` and the interactive
+  TUI's own extension management components
   (`extension-input`/`extension-editor`/`extension-selector`) — the management screens in
-  particular are substantial UI in their own right, not a small wiring exercise like the
-  items above were, and are being scoped separately rather than rushed in alongside them. The
+  particular are substantial UI in their own right, not a small wiring exercise like Phase H's
+  items above, and are being scoped separately rather than rushed in alongside them. The
   classic REPL stays untouched for all of these — genuinely Textual-app UI chrome, unlike
-  Phase G's rendering hooks (which apply to both front-ends).
+  Phase G's rendering hooks (and Phase H's `tools_expanded`, which apply to both front-ends).
 
 ## Scope Reality Check
 

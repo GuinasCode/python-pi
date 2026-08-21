@@ -431,6 +431,90 @@ class TestPiApp:
             assert app.title == "custom title"
 
     @pytest.mark.asyncio
+    async def test_set_tools_expanded_false_hides_the_result_preview(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        target = tmp_path / "written.txt"
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "collapse.py").write_text(
+            "def _handler(args_text, ctx):\n    ctx.ui.set_tools_expanded(False)\n\n"
+            'def extension(pi):\n    pi.register_command("collapse", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(
+            tmp_path,
+            [
+                faux_assistant_message(
+                    [faux_tool_call("write", {"path": str(target), "content": "some content here"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+        )
+        session._permission_mode = PermissionMode.ACCEPT_EDITS
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/collapse"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            input_widget.text = "write the file"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert "some content here" not in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_extension_theme_get_set_via_ctx_ui(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "themecmd.py").write_text(
+            "def _handler(args_text, ctx):\n"
+            '    ctx.ui.set_theme("midnight")\n'
+            '    return f"theme is now {ctx.ui.get_theme()}"\n\n'
+            "def extension(pi):\n"
+            '    pi.register_theme("midnight", primary="#1e1e2e")\n'
+            '    pi.register_command("usetheme", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/usetheme"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert app.theme == "midnight"
+            assert "theme is now midnight" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_add_autocomplete_provider_merges_into_the_popup(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "mentions.py").write_text(
+            'def _provider(text):\n    return ["@bob", "@alice"] if text.startswith("@") else []\n\n'
+            "def _setup(args_text, ctx):\n    ctx.ui.add_autocomplete_provider(_provider)\n\n"
+            'def extension(pi):\n    pi.register_command("mentions", _setup)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/mentions"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            input_widget.text = "@"
+            await pilot.pause()
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is True
+            options = [str(suggestions.get_option_at_index(i).prompt) for i in range(suggestions.option_count)]
+            assert options == ["@bob", "@alice"]
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call
