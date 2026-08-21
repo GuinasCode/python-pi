@@ -15,17 +15,21 @@ from pi_coding_agent.extensions.types import (
     ExtensionAPI,
     ExtensionError,
     ExtensionFactory,
+    ExtensionFlag,
     LoadedExtension,
     LoadExtensionsResult,
+    RegisteredCommand,
 )
 
 __all__ = [
     "ExtensionAPI",
     "ExtensionError",
     "ExtensionFactory",
+    "ExtensionFlag",
     "ExtensionRunner",
     "LoadExtensionsResult",
     "LoadedExtension",
+    "RegisteredCommand",
     "discover_extension_paths",
     "load_extension_from_path",
     "load_extensions",

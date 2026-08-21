@@ -9,6 +9,7 @@ This is the main interactive experience when running `pi` without `-p`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import sys
 import time
@@ -35,6 +36,7 @@ from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
 from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_config_dir, get_session_dir
 from pi_coding_agent.diff_render import render_diff
+from pi_coding_agent.extensions import ExtensionRunner
 from pi_coding_agent.git_info import get_git_repo_line
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
 from pi_coding_agent.permission_mode import (
@@ -235,6 +237,7 @@ class InteractiveSession:
                 memory_store=memory_store,
                 memory_top_k=memory_top_k,
                 permission_gate=self._permission_gate,
+                extension_runner=ExtensionRunner(cwd, self._config_dir),
             )
         )
 
@@ -631,7 +634,7 @@ class InteractiveSession:
                 continue
 
             if user_input.startswith("/"):
-                if not self._handle_command(user_input):
+                if not await self._handle_command(user_input):
                     break
                 continue
 
@@ -646,7 +649,31 @@ class InteractiveSession:
                 error_msg = result.error_message or "Unknown error"
                 _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(error_msg)}")
 
-    def _handle_command(self, command: str) -> bool:
+    async def _handle_extension_command(self, command: str) -> bool:
+        """Dispatch `command` to a matching extension-registered slash
+        command, if any. Returns True if one handled it (whether or not it
+        printed anything), False if no extension owns this command name."""
+        from pi_coding_agent.extensions.events import ExtensionContext
+
+        stripped = command[1:].strip()
+        if not stripped:
+            return False
+        parts = stripped.split(None, 1)
+        name = parts[0]
+        args_text = parts[1] if len(parts) > 1 else ""
+
+        for registered in self._agent_session.get_extension_commands():
+            if registered.name != name:
+                continue
+            result = registered.handler(args_text, ExtensionContext(cwd=self._cwd))
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, str) and result:
+                _console.print(result)
+            return True
+        return False
+
+    async def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
         cmd = command.lower().strip()
 
@@ -662,6 +689,7 @@ class InteractiveSession:
                 f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
+                f"  [{PASTEL_BLUE}]/extensions[/{PASTEL_BLUE}]  List loaded extensions and load errors\n"
             )
             return True
 
@@ -688,6 +716,21 @@ class InteractiveSession:
                 _console.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
             else:
                 _console.print("[dim]no active session[/dim]")
+            return True
+
+        if cmd == "/extensions":
+            extensions = self._agent_session.get_extensions()
+            if not extensions.extensions and not extensions.errors:
+                _console.print("[dim]no extensions loaded[/dim]")
+                return True
+            for ext in extensions.extensions:
+                tools = ", ".join(ext.tool_names) or "(no tools)"
+                _console.print(f"  [{PASTEL_GREEN}]{ext.path}[/{PASTEL_GREEN}]: {tools}")
+            for err in extensions.errors:
+                _console.print(f"  [{PASTEL_RED}]{err.path}[/{PASTEL_RED}]: {escape(err.error)}")
+            return True
+
+        if await self._handle_extension_command(command):
             return True
 
         _console.print(f"[yellow]Unknown command:[/yellow] {command}")

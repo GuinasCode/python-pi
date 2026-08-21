@@ -185,14 +185,28 @@ def load_extension_from_path(path: Path, api: ExtensionAPI) -> ExtensionError | 
         sys.modules.pop(module_name, None)
 
 
-def load_extensions(paths: list[Path]) -> LoadExtensionsResult:
-    """Load every path, aggregating registered tools and any errors."""
+def load_extensions(paths: list[Path], flag_values: dict[str, bool | str] | None = None) -> LoadExtensionsResult:
+    """Load every path, aggregating registered tools and any errors.
+
+    ``flag_values`` (typically an ExtensionRunner's own dict) is shared —
+    not copied — with every extension's ExtensionAPI, so a value set into
+    it after loading is still visible from pi.get_flag() calls made later
+    (e.g. from inside a tool's execute()).
+    """
     result = LoadExtensionsResult()
     for path in paths:
-        api = ExtensionAPI()
+        api = ExtensionAPI(flag_values=flag_values)
         error = load_extension_from_path(path, api)
         if error is not None:
             result.errors.append(error)
             continue
-        result.extensions.append(LoadedExtension(path=str(path), tools=api.tools, handlers=api.handlers))
+        result.extensions.append(
+            LoadedExtension(
+                path=str(path),
+                tools=api.tools,
+                handlers=api.handlers,
+                commands=api.commands,
+                flags=api.flags,
+            )
+        )
     return result

@@ -19,14 +19,35 @@ inside a registered tool's ``execute()``, which is already async.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pi_agent_core.types import AgentTool
-from pi_coding_agent.extensions.events import ExtensionHandler
+from pi_coding_agent.extensions.events import ExtensionContext, ExtensionHandler
 
 ExtensionFactory = Callable[["ExtensionAPI"], Any]
+
+CommandHandler = Callable[[str, ExtensionContext], "Any | Awaitable[Any]"]
+
+
+@dataclass
+class RegisteredCommand:
+    """A slash command an extension registered via ``pi.register_command``."""
+
+    name: str
+    handler: CommandHandler
+    description: str | None = None
+
+
+@dataclass
+class ExtensionFlag:
+    """A CLI flag declaration an extension registered via ``pi.register_flag``."""
+
+    name: str
+    type: Literal["boolean", "string"]
+    default: bool | str | None = None
+    description: str | None = None
 
 
 @dataclass
@@ -49,6 +70,8 @@ class LoadedExtension:
     path: str
     tools: list[AgentTool] = field(default_factory=list)
     handlers: dict[str, list[ExtensionHandler]] = field(default_factory=dict)
+    commands: list[RegisteredCommand] = field(default_factory=list)
+    flags: dict[str, ExtensionFlag] = field(default_factory=dict)
 
     @property
     def tool_names(self) -> list[str]:
@@ -64,14 +87,23 @@ class LoadExtensionsResult:
 class ExtensionAPI:
     """The ``pi`` object passed to an extension's entry point.
 
-    Phase A/B/D surface: tool registration and event subscription.
-    Command/shortcut/flag registration, rendering hooks, and provider
-    registration are added directly onto this class by later phases.
+    Phase A/B/D/E surface: tool registration, event subscription, command
+    registration, and flag declaration/reading. Shortcut registration,
+    rendering hooks, and provider registration are added directly onto
+    this class by later phases.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, flag_values: dict[str, bool | str] | None = None) -> None:
         self._tools: list[AgentTool] = []
         self._handlers: dict[str, list[ExtensionHandler]] = defaultdict(list)
+        self._commands: list[RegisteredCommand] = []
+        self._flags: dict[str, ExtensionFlag] = {}
+        # Shared with the owning ExtensionRunner (same dict object, not a
+        # copy) so pi.get_flag() sees values the runner sets *after* this
+        # extension's factory already ran and returned — e.g. from a tool's
+        # execute() called later — without the runner needing to hold onto
+        # this ExtensionAPI instance itself.
+        self._flag_values: dict[str, bool | str] = flag_values if flag_values is not None else {}
 
     def register_tool(self, tool: AgentTool) -> None:
         """Register a tool the LLM can call."""
@@ -91,3 +123,43 @@ class ExtensionAPI:
     @property
     def handlers(self) -> dict[str, list[ExtensionHandler]]:
         return dict(self._handlers)
+
+    def register_command(
+        self,
+        name: str,
+        handler: CommandHandler,
+        description: str | None = None,
+    ) -> None:
+        """Register a slash command. ``handler(args_text, ctx)`` runs when
+        the user types ``/name ...`` in interactive mode."""
+        self._commands.append(RegisteredCommand(name=name, handler=handler, description=description))
+
+    @property
+    def commands(self) -> list[RegisteredCommand]:
+        return list(self._commands)
+
+    def register_flag(
+        self,
+        name: str,
+        *,
+        type: Literal["boolean", "string"] = "string",
+        default: bool | str | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Declare a CLI flag. Not yet wired to argv parsing (see
+        ExtensionRunner.set_flag_value for how a value actually reaches
+        get_flag) — declaring it here makes it discoverable/documented and
+        gives it a programmatic path to a value regardless."""
+        self._flags[name] = ExtensionFlag(name=name, type=type, default=default, description=description)
+
+    @property
+    def flags(self) -> dict[str, ExtensionFlag]:
+        return dict(self._flags)
+
+    def get_flag(self, name: str) -> bool | str | None:
+        """Current value of a registered flag, or its declared default if
+        nothing set one yet."""
+        if name in self._flag_values:
+            return self._flag_values[name]
+        declared = self._flags.get(name)
+        return declared.default if declared else None

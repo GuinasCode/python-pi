@@ -28,7 +28,7 @@ from pi_ai import (
     UserMessage,
 )
 from pi_ai.models import MutableModels
-from pi_coding_agent.extensions import ExtensionRunner, LoadExtensionsResult
+from pi_coding_agent.extensions import ExtensionFlag, ExtensionRunner, LoadExtensionsResult, RegisteredCommand
 from pi_coding_agent.extensions.events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -374,6 +374,23 @@ class AgentSession:
         if self._extension_runner is None:
             return []
         return self._extension_runner.get_extension_paths()
+
+    def get_extension_commands(self) -> list[RegisteredCommand]:
+        """Every slash command registered by a loaded extension."""
+        if self._extension_runner is None:
+            return []
+        return self._extension_runner.get_commands()
+
+    def get_extension_flags(self) -> dict[str, ExtensionFlag]:
+        """Every CLI flag declared by a loaded extension."""
+        if self._extension_runner is None:
+            return {}
+        return self._extension_runner.get_flags()
+
+    def set_extension_flag_value(self, name: str, value: bool | str) -> None:
+        """Set a flag's value, visible to every extension's pi.get_flag(name)."""
+        if self._extension_runner is not None:
+            self._extension_runner.set_flag_value(name, value)
 
     def get_last_assistant_text(self) -> str:
         """Concatenated text of the most recent assistant message, or ''."""

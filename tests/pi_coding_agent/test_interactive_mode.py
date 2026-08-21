@@ -40,37 +40,37 @@ def test_interactive_run_turn(tmp_path: Path) -> None:
 
 def test_interactive_slash_help(tmp_path: Path, capsys: object) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/help") is True
+    assert asyncio.run(session._handle_command("/help")) is True
 
 
 def test_interactive_slash_exit(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/exit") is False
+    assert asyncio.run(session._handle_command("/exit")) is False
 
 
 def test_interactive_slash_model(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/model") is True
+    assert asyncio.run(session._handle_command("/model")) is True
 
 
 def test_interactive_slash_clear(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/clear") is True
+    assert asyncio.run(session._handle_command("/clear")) is True
 
 
 def test_interactive_slash_tools(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/tools") is True
+    assert asyncio.run(session._handle_command("/tools")) is True
 
 
 def test_interactive_slash_session(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/session") is True
+    assert asyncio.run(session._handle_command("/session")) is True
 
 
 def test_interactive_unknown_command(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
-    assert session._handle_command("/unknown") is True
+    assert asyncio.run(session._handle_command("/unknown")) is True
 
 
 class TestPermissionModeFooter:
@@ -145,3 +145,38 @@ class TestRepoLine:
             line = session._repo_line()
         assert line is not None
         assert "(python-pi:main)" in line
+
+
+_GREET_EXTENSION = """
+def _greet(args_text, ctx):
+    return f"hello {args_text}"
+
+def extension(pi):
+    pi.register_command("greet", _greet, description="Greets someone")
+"""
+
+
+class TestExtensionsIntegration:
+    def test_extensions_command_reports_no_extensions(self, tmp_path: Path, capsys: object) -> None:
+        session = _make_session(tmp_path)
+        assert asyncio.run(session._handle_command("/extensions")) is True
+
+    def test_loaded_extension_is_reported_by_slash_extensions(self, tmp_path: Path, capsys: object) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "greet.py").write_text(_GREET_EXTENSION, encoding="utf-8")
+
+        session = _make_session(tmp_path)
+        assert asyncio.run(session._handle_command("/extensions")) is True
+
+    def test_extension_registered_command_is_dispatched(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "greet.py").write_text(_GREET_EXTENSION, encoding="utf-8")
+
+        session = _make_session(tmp_path)
+        assert asyncio.run(session._handle_command("/greet Bob")) is True
+
+    def test_unregistered_command_still_falls_through_to_unknown(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        assert asyncio.run(session._handle_command("/not_a_real_command")) is True

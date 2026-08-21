@@ -26,7 +26,12 @@ from pi_coding_agent.extensions.events import (
     ToolResultEventResult,
 )
 from pi_coding_agent.extensions.loader import discover_extension_paths, load_extensions
-from pi_coding_agent.extensions.types import ExtensionError, LoadExtensionsResult
+from pi_coding_agent.extensions.types import (
+    ExtensionError,
+    ExtensionFlag,
+    LoadExtensionsResult,
+    RegisteredCommand,
+)
 
 __all__ = ["ExtensionRunner"]
 
@@ -53,13 +58,17 @@ class ExtensionRunner:
         self._configured_paths = configured_paths or []
         self._result = LoadExtensionsResult()
         self._handlers: dict[str, list[tuple[str, ExtensionHandler]]] = defaultdict(list)
+        # Shared with every extension's ExtensionAPI (see load_extensions) so
+        # set_flag_value() takes effect for pi.get_flag() calls made from
+        # inside a tool's execute(), long after load() itself has returned.
+        self._flag_values: dict[str, bool | str] = {}
 
     def load(self) -> LoadExtensionsResult:
         """(Re)discover and (re)load every extension, replacing any
         previous result. Safe to call again (e.g. from a session reload)
         after project files on disk have changed."""
         paths = discover_extension_paths(self._cwd, self._agent_dir, self._configured_paths)
-        self._result = load_extensions(paths)
+        self._result = load_extensions(paths, flag_values=self._flag_values)
 
         self._handlers = defaultdict(list)
         for ext in self._result.extensions:
@@ -68,6 +77,23 @@ class ExtensionRunner:
                     self._handlers[event_name].append((ext.path, handler))
 
         return self._result
+
+    def get_commands(self) -> list[RegisteredCommand]:
+        """Every slash command registered by every successfully loaded extension."""
+        return [command for ext in self._result.extensions for command in ext.commands]
+
+    def get_flags(self) -> dict[str, ExtensionFlag]:
+        """Every CLI flag declared by every successfully loaded extension,
+        keyed by name (a later extension's declaration wins on a name clash)."""
+        flags: dict[str, ExtensionFlag] = {}
+        for ext in self._result.extensions:
+            flags.update(ext.flags)
+        return flags
+
+    def set_flag_value(self, name: str, value: bool | str) -> None:
+        """Set a flag's current value — visible to every loaded extension's
+        pi.get_flag(name) from this point on."""
+        self._flag_values[name] = value
 
     def get_extensions(self) -> LoadExtensionsResult:
         """The result of the most recent load() — empty (no extensions,
