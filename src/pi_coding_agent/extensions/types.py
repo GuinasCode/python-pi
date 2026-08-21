@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pi_agent_core.types import AgentTool
+from pi_ai.models import MutableModels, Provider
 from pi_coding_agent.extensions.events import ExtensionContext, ExtensionHandler
 
 ExtensionFactory = Callable[["ExtensionAPI"], Any]
@@ -87,13 +88,19 @@ class LoadExtensionsResult:
 class ExtensionAPI:
     """The ``pi`` object passed to an extension's entry point.
 
-    Phase A/B/D/E surface: tool registration, event subscription, command
-    registration, and flag declaration/reading. Shortcut registration,
-    rendering hooks, and provider registration are added directly onto
-    this class by later phases.
+    Phase A/B/D/E/F surface: tool registration, event subscription, command
+    registration, flag declaration/reading, and provider registration.
+    Shortcut registration and rendering hooks are not implemented — see
+    ARCHITECTURE.md's extension-system status note for why (they need UI
+    infrastructure — a keybinding dispatcher, a widget/dialog system —
+    this port doesn't have yet).
     """
 
-    def __init__(self, flag_values: dict[str, bool | str] | None = None) -> None:
+    def __init__(
+        self,
+        flag_values: dict[str, bool | str] | None = None,
+        models: MutableModels | None = None,
+    ) -> None:
         self._tools: list[AgentTool] = []
         self._handlers: dict[str, list[ExtensionHandler]] = defaultdict(list)
         self._commands: list[RegisteredCommand] = []
@@ -104,6 +111,12 @@ class ExtensionAPI:
         # execute() called later — without the runner needing to hold onto
         # this ExtensionAPI instance itself.
         self._flag_values: dict[str, bool | str] = flag_values if flag_values is not None else {}
+        # Also shared (not copied): the same MutableModels the AgentSession
+        # actually streams against, so register_provider/unregister_provider
+        # take effect immediately — during initial load and from any later
+        # command/event handler alike — unlike the original's queue-then-
+        # apply-once-bound dance, which our construction order doesn't need.
+        self._models = models
 
     def register_tool(self, tool: AgentTool) -> None:
         """Register a tool the LLM can call."""
@@ -163,3 +176,20 @@ class ExtensionAPI:
             return self._flag_values[name]
         declared = self._flags.get(name)
         return declared.default if declared else None
+
+    def register_provider(self, provider: Provider[Any]) -> None:
+        """Register or replace a model provider. A no-op if this session
+        wasn't given a MutableModels to register into (e.g. a harness that
+        doesn't pass one). Simplified vs. the original: only the full
+        ``Provider`` object form is supported, not the partial
+        ``ProviderConfig`` (baseUrl-only override, OAuth login flow) —
+        this port has no equivalent config-merge/OAuth machinery to plug
+        that into yet.
+        """
+        if self._models is not None:
+            self._models.set_provider(provider)
+
+    def unregister_provider(self, name: str) -> None:
+        """Remove a previously registered provider. No-op if it isn't registered."""
+        if self._models is not None:
+            self._models.delete_provider(name)

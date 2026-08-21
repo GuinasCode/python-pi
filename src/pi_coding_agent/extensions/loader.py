@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from pi_ai.models import MutableModels
 from pi_coding_agent.config import CONFIG_DIR_NAME, get_config_dir
 from pi_coding_agent.extensions.types import (
     ExtensionAPI,
@@ -185,17 +186,22 @@ def load_extension_from_path(path: Path, api: ExtensionAPI) -> ExtensionError | 
         sys.modules.pop(module_name, None)
 
 
-def load_extensions(paths: list[Path], flag_values: dict[str, bool | str] | None = None) -> LoadExtensionsResult:
+def load_extensions(
+    paths: list[Path],
+    flag_values: dict[str, bool | str] | None = None,
+    models: MutableModels | None = None,
+) -> LoadExtensionsResult:
     """Load every path, aggregating registered tools and any errors.
 
     ``flag_values`` (typically an ExtensionRunner's own dict) is shared —
     not copied — with every extension's ExtensionAPI, so a value set into
     it after loading is still visible from pi.get_flag() calls made later
-    (e.g. from inside a tool's execute()).
+    (e.g. from inside a tool's execute()). ``models`` (also shared, not
+    copied) is what pi.register_provider()/unregister_provider() act on.
     """
     result = LoadExtensionsResult()
     for path in paths:
-        api = ExtensionAPI(flag_values=flag_values)
+        api = ExtensionAPI(flag_values=flag_values, models=models)
         error = load_extension_from_path(path, api)
         if error is not None:
             result.errors.append(error)

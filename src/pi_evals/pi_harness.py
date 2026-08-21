@@ -238,7 +238,7 @@ async def _run_pi_coding_agent(pi_input: PiEvalInput, options: PiCodingAgentHarn
     agent_dir.mkdir()
 
     try:
-        extension_runner = ExtensionRunner(cwd, agent_dir) if options.enable_extensions else None
+        extension_runner = ExtensionRunner(cwd, agent_dir, models=models) if options.enable_extensions else None
         session = AgentSession(
             AgentSessionOptions(
                 models=models,

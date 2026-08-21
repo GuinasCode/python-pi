@@ -237,7 +237,7 @@ class InteractiveSession:
                 memory_store=memory_store,
                 memory_top_k=memory_top_k,
                 permission_gate=self._permission_gate,
-                extension_runner=ExtensionRunner(cwd, self._config_dir),
+                extension_runner=ExtensionRunner(cwd, self._config_dir, models=models),
             )
         )
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from pi_agent_core.types import AgentTool
+from pi_ai.models import MutableModels
 from pi_coding_agent.extensions.events import (
     ExtensionContext,
     ExtensionHandler,
@@ -52,10 +53,12 @@ class ExtensionRunner:
         cwd: str | Path,
         agent_dir: str | Path | None = None,
         configured_paths: list[str] | None = None,
+        models: MutableModels | None = None,
     ) -> None:
         self._cwd = cwd
         self._agent_dir = agent_dir
         self._configured_paths = configured_paths or []
+        self._models = models
         self._result = LoadExtensionsResult()
         self._handlers: dict[str, list[tuple[str, ExtensionHandler]]] = defaultdict(list)
         # Shared with every extension's ExtensionAPI (see load_extensions) so
@@ -68,7 +71,7 @@ class ExtensionRunner:
         previous result. Safe to call again (e.g. from a session reload)
         after project files on disk have changed."""
         paths = discover_extension_paths(self._cwd, self._agent_dir, self._configured_paths)
-        self._result = load_extensions(paths, flag_values=self._flag_values)
+        self._result = load_extensions(paths, flag_values=self._flag_values, models=self._models)
 
         self._handlers = defaultdict(list)
         for ext in self._result.extensions:
