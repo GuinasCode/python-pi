@@ -32,11 +32,12 @@ from rich.console import RenderableType
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from pi_ai import StopReason
 from pi_coding_agent.interactive_mode import InteractiveSession
 from pi_coding_agent.permission_mode import permission_mode_label
+from pi_coding_agent.prompt_editor import PromptTextArea
 
 __all__ = ["PiApp"]
 
@@ -93,6 +94,8 @@ class PiApp(App[None]):
     }
     #prompt-input {
         dock: bottom;
+        height: 3;
+        border: solid $accent;
     }
     """
 
@@ -112,13 +115,13 @@ class PiApp(App[None]):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="transcript")
         yield Static(id="status-footer")
-        yield Input(placeholder="Type a message or /command…", id="prompt-input")
+        yield PromptTextArea(id="prompt-input")
 
     def on_mount(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
         self._session._output = _TranscriptSink(transcript)
         self._update_footer()
-        self.query_one("#prompt-input", Input).focus()
+        self.query_one("#prompt-input", PromptTextArea).focus()
 
     def _update_footer(self) -> None:
         mode_label = permission_mode_label(self._session._permission_mode)
@@ -129,9 +132,9 @@ class PiApp(App[None]):
         self._session._cycle_permission_mode()
         self._update_footer()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
         text = event.value.strip()
-        event.input.value = ""
+        event.text_area.text = ""
         if not text:
             return
 

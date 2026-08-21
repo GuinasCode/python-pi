@@ -14,13 +14,14 @@ from typing import Any
 import pytest
 from rich.console import Console
 from textual.containers import VerticalScroll
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
 from pi_coding_agent.interactive_mode import InteractiveSession
 from pi_coding_agent.output_sink import ConsoleOutputSink
 from pi_coding_agent.permission_mode import PermissionMode
+from pi_coding_agent.prompt_editor import PromptTextArea
 from pi_coding_agent.session_manager import SessionManager
 from pi_coding_agent.tui_app import PiApp, _TranscriptSink
 
@@ -123,12 +124,12 @@ class TestPiApp:
         session = _make_session(tmp_path, [faux_assistant_message("the answer is 42")])
         app = PiApp(session)
         async with app.run_test() as pilot:
-            input_widget = app.query_one("#prompt-input", Input)
-            input_widget.value = "what is the answer?"
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "what is the answer?"
             await pilot.press("enter")
             await pilot.pause()
 
-            assert input_widget.value == ""
+            assert input_widget.text == ""
             text = _transcript_text(app)
             assert "what is the answer?" in text
             assert "42" in text
@@ -138,8 +139,8 @@ class TestPiApp:
         session = _make_session(tmp_path)
         app = PiApp(session)
         async with app.run_test() as pilot:
-            input_widget = app.query_one("#prompt-input", Input)
-            input_widget.value = ""
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = ""
             await pilot.press("enter")
             await pilot.pause()
             transcript = app.query_one("#transcript", VerticalScroll)
@@ -150,8 +151,8 @@ class TestPiApp:
         session = _make_session(tmp_path)
         app = PiApp(session)
         async with app.run_test() as pilot:
-            input_widget = app.query_one("#prompt-input", Input)
-            input_widget.value = "/model"
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/model"
             await pilot.press("enter")
             await pilot.pause()
             assert session._agent_session._messages == []
@@ -161,8 +162,8 @@ class TestPiApp:
         session = _make_session(tmp_path)
         app = PiApp(session)
         async with app.run_test() as pilot:
-            input_widget = app.query_one("#prompt-input", Input)
-            input_widget.value = "/exit"
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/exit"
             await pilot.press("enter")
             await pilot.pause()
             assert app._exit is True
@@ -196,8 +197,8 @@ class TestPiApp:
         session = _make_session(tmp_path)
         app = PiApp(session)
         async with app.run_test() as pilot:
-            input_widget = app.query_one("#prompt-input", Input)
-            input_widget.value = "/greet Bob"
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/greet Bob"
             await pilot.press("enter")
             await pilot.pause()
             assert "hello Bob" in _transcript_text(app)
