@@ -8,15 +8,18 @@ instead of duplicating that logic for a second front-end. The classic
 REPL (``interactive_mode.repl_loop``) is untouched and stays the default;
 this is opt-in via ``--ui-mode fullscreen``/``--alt`` while it matures.
 
-Scope for T0-T5 so far: the app shell (transcript + input + footer),
+Scope for T0-T6 so far: the app shell (transcript + input + footer),
 streaming turn rendering, slash commands (including extension-registered
 ones), a real multi-line prompt editor, permission-mode confirmation via a
 modal dialog (Phase T2), a keybinding dispatcher for extension-registered
 shortcuts (Phase T3), a slash-command autocomplete popup (Phase T4), and
 extension-registered color themes (Phase T5 — registered onto Textual's
 own theme system; switchable today via Textual's built-in command palette,
-Ctrl+P). Deliberately NOT wired yet: footer/header customization and
-rendering hooks (Phase T6, G, H).
+Ctrl+P), and a live-updating footer (Phase T6 — InteractiveSession calls
+back into the footer refresh after every streamed event, so status
+transitions like "thinking..." -> "running: bash" -> "ready" show up
+during a turn, not only right before/after it). Deliberately NOT wired
+yet: rendering hooks and the full ExtensionUIContext (Phases G, H).
 """
 
 from __future__ import annotations
@@ -128,6 +131,7 @@ class PiApp(App[None]):
         transcript = self.query_one("#transcript", VerticalScroll)
         self._session._output = _TranscriptSink(transcript)
         self._session._confirm_tool_fn = self._confirm_tool_via_modal
+        self._session._on_status_change = self._update_footer
         for theme in self._session._agent_session.get_extension_themes():
             self.register_theme(
                 Theme(

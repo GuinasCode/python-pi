@@ -38,6 +38,22 @@ def test_interactive_run_turn(tmp_path: Path) -> None:
     assert any(block.type == "text" and "interactive" in block.text for block in result.content)
 
 
+def test_on_status_change_fires_during_a_turn(tmp_path: Path) -> None:
+    """Phase T6: PiApp refreshes its footer live by hooking this callback
+    — it must fire at least once per turn (on "done") so the footer isn't
+    stuck showing whatever status was true before the turn started."""
+    session = _make_session(tmp_path)
+    calls = 0
+
+    def _on_change() -> None:
+        nonlocal calls
+        calls += 1
+
+    session._on_status_change = _on_change
+    asyncio.run(session.run_turn("hello"))
+    assert calls > 0
+
+
 def test_interactive_slash_help(tmp_path: Path, capsys: object) -> None:
     session = _make_session(tmp_path)
     assert asyncio.run(session._handle_command("/help")) is True

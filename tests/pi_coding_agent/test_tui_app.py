@@ -328,6 +328,16 @@ class TestPiApp:
             assert str(suggestions.get_option_at_index(0).prompt) == "/greet"
 
     @pytest.mark.asyncio
+    async def test_on_mount_wires_live_footer_updates(self, tmp_path: Path) -> None:
+        """Phase T6: the footer must refresh live as a turn progresses, not
+        only right before/after submission — on_mount wires
+        InteractiveSession's status-change hook straight to _update_footer."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test():
+            assert session._on_status_change == app._update_footer
+
+    @pytest.mark.asyncio
     async def test_extension_theme_is_registered_and_selectable(self, tmp_path: Path) -> None:
         ext_dir = tmp_path / ".pi" / "extensions"
         ext_dir.mkdir(parents=True)

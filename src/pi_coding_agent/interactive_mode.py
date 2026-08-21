@@ -266,6 +266,13 @@ class InteractiveSession:
         self._text_block_buf = ""
         # Human-readable current status shown below the input box.
         self._status = "ready"
+        # Phase T6: called whenever _handle_event has just processed an
+        # event (i.e. self._status may have changed) — PiApp uses this to
+        # refresh its footer live during a turn (thinking/running tool/
+        # ready), instead of only at submission start/end. None in the
+        # classic REPL, which prints its status line directly rather than
+        # keeping a persistent footer to refresh.
+        self._on_status_change: Callable[[], None] | None = None
 
     def _cycle_permission_mode(self) -> None:
         self._permission_mode = cycle_permission_mode(self._permission_mode)
@@ -472,6 +479,9 @@ class InteractiveSession:
             else:
                 msg = getattr(err, "error_message", None) or "Unknown error"
             self._output.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
+
+        if self._on_status_change is not None:
+            self._on_status_change()
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
         """Run a single conversation turn."""

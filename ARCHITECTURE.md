@@ -38,15 +38,25 @@ autocomplete — an `OptionList` popup driven by plain prefix matching over buil
 extension-registered command names, since Textual's `Suggester` only attaches to `Input`, not
 the `TextArea` the prompt editor is built on; Tab accepts, Escape dismisses, Up/Down move the
 highlight), T5 (color themes — `pi.register_theme()` registers a `textual.theme.Theme` onto
-the app; switchable today via Textual's built-in command palette, Ctrl+P).
+the app; switchable today via Textual's built-in command palette, Ctrl+P), T6 (live-updating
+footer — `InteractiveSession._on_status_change` fires after every streamed event, so the
+footer reflects "thinking...", "running: `<tool>`", and "ready" transitions as they happen
+during a turn instead of only right before/after submission).
+
+This closes out the T0-T6 foundation phases as originally scoped. Deliberately not added
+speculatively during T6: a generic custom header/extra-widget slot — nothing concrete needs
+one yet (no extension API exposes it), and adding one now would be exactly the "half-wiring
+registration APIs with nothing real behind them" this section warns against below; it lands
+in Phase H alongside `ExtensionUIContext.setHeader`/`setWidget` instead, once there's a real
+caller.
 
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
 - Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets, custom
-  autocomplete providers wired to `pi.addAutocompleteProvider`, custom editors) and the
-  interactive TUI's own extension management components
-  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phase T6
-  (footer/header widgets) then G/H (rendering hooks, `ExtensionUIContext`) of the Textual-app
-  work described above, once each has a concrete Textual mechanism to sit on (T2's
+  autocomplete providers wired to `pi.addAutocompleteProvider`, custom editors, custom
+  header/footer/widget slots) and the interactive TUI's own extension management components
+  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phase G
+  (rendering hooks) then H (`ExtensionUIContext`) of the Textual-app work described above,
+  once each has a concrete Textual mechanism to sit on (T2's
   `ModalScreen` pattern already covers dialogs; T3's dispatcher already covers shortcuts; T4's
   popup already covers the autocomplete *mechanism*, extension-supplied providers are a Phase
   H wiring exercise on top of it; T5's registration already covers themes, a Phase H
