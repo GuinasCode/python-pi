@@ -18,8 +18,12 @@ own theme system; switchable today via Textual's built-in command palette,
 Ctrl+P), and a live-updating footer (Phase T6 — InteractiveSession calls
 back into the footer refresh after every streamed event, so status
 transitions like "thinking..." -> "running: bash" -> "ready" show up
-during a turn, not only right before/after it). Deliberately NOT wired
-yet: rendering hooks and the full ExtensionUIContext (Phases G, H).
+during a turn, not only right before/after it), and (H, in progress)
+ExtensionUIContext's select()/confirm()/input()/notify() — TextualExtensionUIContext,
+backed by SelectDialog/ConfirmDialog/InputDialog. NOT wired yet: the rest
+of ExtensionUIContext (setWidget/setFooter/setHeader/setTitle, editor
+manipulation, addAutocompleteProvider, theme get/set,
+getToolsExpanded/setToolsExpanded) and the extension-management screens.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from textual.widgets import OptionList, Static
 
 from pi_ai import StopReason
 from pi_coding_agent.autocomplete import command_suggestions
-from pi_coding_agent.dialogs import ConfirmDialog
+from pi_coding_agent.dialogs import ConfirmDialog, InputDialog, SelectDialog
 from pi_coding_agent.interactive_mode import InteractiveSession, _fmt_args
 from pi_coding_agent.permission_mode import permission_mode_label
 from pi_coding_agent.prompt_editor import PromptTextArea
@@ -78,6 +82,29 @@ class _TranscriptSink:
         self._current_text = ""
         self._transcript.mount(Static(renderable))
         self._transcript.scroll_end(animate=False)
+
+
+class TextualExtensionUIContext:
+    """Phase H: the interactive-prompt half of ExtensionUIContext, backed
+    by the T2/H dialog screens (dialogs.py) — select()/confirm()/input()
+    each push a modal and await its result; notify() uses Textual's own
+    toast mechanism directly, no dialog needed."""
+
+    def __init__(self, app: PiApp) -> None:
+        self._app = app
+
+    async def select(self, message: str, choices: list[str]) -> str | None:
+        return await self._app.push_screen_wait(SelectDialog(message, choices))
+
+    async def confirm(self, message: str) -> bool:
+        result = await self._app.push_screen_wait(ConfirmDialog(message))
+        return bool(result)
+
+    async def input(self, message: str, default: str = "") -> str | None:
+        return await self._app.push_screen_wait(InputDialog(message, default))
+
+    def notify(self, message: str, *, severity: str = "information") -> None:
+        self._app.notify(message, severity=severity)  # type: ignore[arg-type]
 
 
 class PiApp(App[None]):
@@ -132,6 +159,7 @@ class PiApp(App[None]):
         self._session._output = _TranscriptSink(transcript)
         self._session._confirm_tool_fn = self._confirm_tool_via_modal
         self._session._on_status_change = self._update_footer
+        self._session._ui_context = TextualExtensionUIContext(self)
         for theme in self._session._agent_session.get_extension_themes():
             self.register_theme(
                 Theme(

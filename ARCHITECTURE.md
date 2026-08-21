@@ -55,19 +55,26 @@ registration APIs with nothing real behind them" this section warns against belo
 in Phase H alongside `ExtensionUIContext.setHeader`/`setWidget` instead, once there's a real
 caller.
 
+Phase H (`ExtensionUIContext`) is in progress. Ported so far: `select()`/`confirm()`/
+`input()`/`notify()` — `ExtensionContext.ui`, defaulting to `NoopExtensionUIContext`
+(`extension_ui.py`; the classic REPL keeps this default, so these four report
+"cancelled"/"declined" there rather than blocking or hand-building a REPL-side prompt UI for
+a surface the Textual app already covers), swapped for `TextualExtensionUIContext`
+(`tui_app.py`) in the Textual app — `select`/`confirm`/`input` push `SelectDialog`/
+`ConfirmDialog`/`InputDialog` (`dialogs.py`) and await the result; `notify` uses Textual's own
+toast mechanism directly.
+
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- Dialogs/widgets beyond `ConfirmDialog`, custom autocomplete providers wired to
-  `pi.addAutocompleteProvider`, custom editors, custom header/footer/widget slots, and the
-  interactive TUI's own extension management components
-  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phase H
-  (`ExtensionUIContext`) of the Textual-app work described above, once each has a concrete
-  Textual mechanism to sit on (T2's `ModalScreen` pattern already covers dialogs; T3's
-  dispatcher already covers shortcuts; T4's popup already covers the autocomplete
-  *mechanism*, extension-supplied providers are a Phase H wiring exercise on top of it; T5's
-  registration already covers themes, a Phase H `setTheme`/`getTheme` is just
-  `app.theme = name` on top of it). The classic REPL (`interactive_mode.py`'s
-  `rich.console.Console` loop) stays untouched for these — this remaining set is genuinely
-  Textual-app UI chrome, unlike Phase G's rendering hooks above (which apply to both).
+- The rest of `ExtensionUIContext`: `setWidget`/`setFooter`/`setHeader`/`setTitle` (custom UI
+  regions), `pasteToEditor`/`setEditorText`/`getEditorText`/`setEditorComponent`,
+  `addAutocompleteProvider` (the extension-facing API — T4's popup already covers the
+  mechanism), theme getters/setters (trivial once needed — `app.theme = name` on top of T5's
+  registration), `getToolsExpanded`/`setToolsExpanded`, and the interactive TUI's own
+  extension management components (`extension-input`/`extension-editor`/`extension-selector`)
+  — these need a widget-slot mechanism this port doesn't have yet, the same way dialogs
+  needed T2's `ModalScreen` pattern before `select`/`confirm`/`input` could exist. The classic
+  REPL stays untouched for all of these — genuinely Textual-app UI chrome, unlike Phase G's
+  rendering hooks (which apply to both front-ends).
 
 ## Scope Reality Check
 

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pi_ai import ImageContent, TextContent
+from pi_coding_agent.extension_ui import ExtensionUIContext, NoopExtensionUIContext
 
 __all__ = [
     "AgentEndEvent",
@@ -45,12 +46,17 @@ __all__ = [
 class ExtensionContext:
     """Passed to every event handler alongside the event itself.
 
-    Deliberately minimal for now — the original's ExtensionContext also
-    exposes actions (sendMessage, appendEntry, setLabel, ...); those are
-    added if/when a handler use case actually needs them.
+    ``ui`` (Phase H) is the interactive-prompt surface — select/confirm/
+    input/notify. Defaults to :class:`NoopExtensionUIContext`; callers
+    that construct an ``ExtensionContext`` from inside the Textual app
+    pass a Textual-backed one instead (see tui_app.py). Still deliberately
+    minimal beyond that — the original's ExtensionContext also exposes
+    actions like sendMessage/appendEntry/setLabel; those are added if/when
+    a handler use case actually needs them.
     """
 
     cwd: str
+    ui: ExtensionUIContext = field(default_factory=NoopExtensionUIContext)
 
 
 @dataclass

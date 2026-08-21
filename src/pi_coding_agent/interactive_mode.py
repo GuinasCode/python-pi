@@ -36,6 +36,7 @@ from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
 from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_config_dir, get_session_dir
 from pi_coding_agent.diff_render import render_diff
+from pi_coding_agent.extension_ui import ExtensionUIContext, NoopExtensionUIContext
 from pi_coding_agent.extensions import ExtensionRunner
 from pi_coding_agent.git_info import get_git_repo_line
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
@@ -217,6 +218,13 @@ class InteractiveSession:
         # T2) swaps this for an async modal dialog instead, since a
         # blocking input() call would freeze its event loop.
         self._confirm_tool_fn: Callable[[str, dict[str, Any]], Awaitable[bool]] = self._confirm_tool
+        # Interactive-prompt surface passed to extension handlers via
+        # ExtensionContext.ui (Phase H). Defaults to a no-op — the REPL has
+        # no way to show a select/input dialog without hand-building one,
+        # which isn't worth doing for a surface the Textual app already
+        # covers; the Textual app (PiApp.on_mount) swaps this for a
+        # dialog-backed implementation.
+        self._ui_context: ExtensionUIContext = NoopExtensionUIContext()
 
         resources = load_resources(cwd, self._config_dir)
 
@@ -401,7 +409,7 @@ class InteractiveSession:
             return False
         from pi_coding_agent.extensions.events import ExtensionContext
 
-        rendered = renderer(phase, event, ExtensionContext(cwd=self._cwd))
+        rendered = renderer(phase, event, ExtensionContext(cwd=self._cwd, ui=self._ui_context))
         if rendered is None:
             return False
         if isinstance(rendered, str):
@@ -420,7 +428,7 @@ class InteractiveSession:
         if buf.strip():
             from pi_coding_agent.extensions.events import ExtensionContext
 
-            ctx = ExtensionContext(cwd=self._cwd)
+            ctx = ExtensionContext(cwd=self._cwd, ui=self._ui_context)
             for transformer in self._agent_session.get_extension_markdown_transformers():
                 buf = transformer(buf, ctx)
             renderer = self._agent_session.get_extension_message_renderer("assistant")
@@ -726,7 +734,7 @@ class InteractiveSession:
         for registered in self._agent_session.get_extension_commands():
             if registered.name != name:
                 continue
-            result = registered.handler(args_text, ExtensionContext(cwd=self._cwd))
+            result = registered.handler(args_text, ExtensionContext(cwd=self._cwd, ui=self._ui_context))
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, str) and result:
@@ -746,7 +754,7 @@ class InteractiveSession:
         for registered in self._agent_session.get_extension_shortcuts():
             if registered.key != key:
                 continue
-            result = registered.handler(ExtensionContext(cwd=self._cwd))
+            result = registered.handler(ExtensionContext(cwd=self._cwd, ui=self._ui_context))
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, str) and result:

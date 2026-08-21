@@ -353,6 +353,48 @@ class TestPiApp:
             assert app.theme == "midnight"
 
     @pytest.mark.asyncio
+    async def test_extension_command_can_confirm_via_ctx_ui(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "confirmcmd.py").write_text(
+            "async def _handler(args_text, ctx):\n"
+            '    ok = await ctx.ui.confirm("Really?")\n'
+            '    return "confirmed" if ok else "declined"\n\n'
+            'def extension(pi):\n    pi.register_command("doit", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/doit"
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("y")
+            await _settle(app, pilot)
+            assert "confirmed" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_extension_command_notify_reaches_the_app(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "notifycmd.py").write_text(
+            'def _handler(args_text, ctx):\n    ctx.ui.notify("hi there")\n\n'
+            'def extension(pi):\n    pi.register_command("ping", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        notified: list[str] = []
+        app.notify = lambda message, **_k: notified.append(message)  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/ping"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert notified == ["hi there"]
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call
