@@ -24,6 +24,14 @@ def extension(pi):
     pi.register_flag("verbose", type="boolean", default=False, description="Be verbose")
 """
 
+_SHORTCUT_EXTENSION = """
+def _on_hotkey(ctx):
+    return f"hotkey fired from {ctx.cwd}"
+
+def extension(pi):
+    pi.register_shortcut("ctrl+g", _on_hotkey, description="Fire the hotkey")
+"""
+
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +50,19 @@ class TestExtensionAPICommands:
         assert len(api.commands) == 1
         assert api.commands[0].name == "mycmd"
         assert api.commands[0].description == "does a thing"
+
+
+class TestExtensionAPIShortcuts:
+    def test_register_shortcut_is_collected(self) -> None:
+        api = ExtensionAPI()
+
+        def handler(_ctx: ExtensionContext) -> str:
+            return "ok"
+
+        api.register_shortcut("ctrl+g", handler, description="does a thing")
+        assert len(api.shortcuts) == 1
+        assert api.shortcuts[0].key == "ctrl+g"
+        assert api.shortcuts[0].description == "does a thing"
 
 
 class TestExtensionAPIFlags:
@@ -85,6 +106,45 @@ class TestLoaderCapturesCommandsAndFlags:
         result = load_extensions([path])
         assert len(result.extensions) == 1
         assert result.extensions[0].commands[0].name == "greet"
+
+
+class TestLoaderCapturesShortcuts:
+    def test_shortcut_extension_is_captured(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "shortcut.py", _SHORTCUT_EXTENSION)
+        api = ExtensionAPI()
+        error = load_extension_from_path(path, api)
+        assert error is None
+        assert len(api.shortcuts) == 1
+        assert api.shortcuts[0].key == "ctrl+g"
+
+    def test_load_extensions_aggregates_shortcuts_into_loaded_extension(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "shortcut.py", _SHORTCUT_EXTENSION)
+        result = load_extensions([path])
+        assert len(result.extensions) == 1
+        assert result.extensions[0].shortcuts[0].key == "ctrl+g"
+
+
+class TestExtensionRunnerShortcuts:
+    def test_get_shortcuts_aggregates_across_extensions(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "shortcut.py", _SHORTCUT_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        shortcuts = runner.get_shortcuts()
+        assert len(shortcuts) == 1
+        assert shortcuts[0].key == "ctrl+g"
+
+    def test_shortcut_handler_can_be_invoked(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "shortcut.py", _SHORTCUT_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        shortcut = runner.get_shortcuts()[0]
+        result = shortcut.handler(ExtensionContext(cwd=str(tmp_path)))
+        assert result == f"hotkey fired from {tmp_path}"
+
+    def test_no_shortcuts_when_nothing_loaded(self, tmp_path: Path) -> None:
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        assert runner.get_shortcuts() == []
 
 
 class TestExtensionRunnerCommandsAndFlags:

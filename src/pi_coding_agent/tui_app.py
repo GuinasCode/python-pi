@@ -8,12 +8,12 @@ instead of duplicating that logic for a second front-end. The classic
 REPL (``interactive_mode.repl_loop``) is untouched and stays the default;
 this is opt-in via ``--ui-mode fullscreen``/``--alt`` while it matures.
 
-Scope for T0/T1/T2 so far: the app shell (transcript + input + footer),
+Scope for T0/T1/T2/T3 so far: the app shell (transcript + input + footer),
 streaming turn rendering, slash commands (including extension-registered
-ones), a real multi-line prompt editor, and permission-mode confirmation
-via a modal dialog (Phase T2 — replaces the REPL's blocking y/N input(),
-which would freeze Textual's event loop). Deliberately NOT wired yet:
-register_shortcut and rendering hooks (Phases T3-T6, G, H).
+ones), a real multi-line prompt editor, permission-mode confirmation via a
+modal dialog (Phase T2), and a keybinding dispatcher for
+extension-registered shortcuts (Phase T3). Deliberately NOT wired yet:
+rendering hooks (Phases T4-T6, G, H).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from rich.console import RenderableType
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
@@ -134,6 +134,29 @@ class PiApp(App[None]):
 
     def action_cycle_permission_mode(self) -> None:
         self._session._cycle_permission_mode()
+        self._update_footer()
+
+    def on_key(self, event: events.Key) -> None:
+        """Phase T3 keybinding dispatcher: fire a matching
+        extension-registered shortcut (``pi.register_shortcut``) before the
+        key reaches whatever widget is focused — e.g. so a shortcut key
+        doesn't also get typed as a literal character into the prompt
+        editor. A no-op check on every keystroke when no extension
+        registered any shortcuts, which is the common case.
+        """
+        if not any(s.key == event.key for s in self._session._agent_session.get_extension_shortcuts()):
+            return
+        event.stop()
+        event.prevent_default()
+        self._dispatch_shortcut(event.key)
+
+    @work(exclusive=True)
+    async def _dispatch_shortcut(self, key: str) -> None:
+        """Runs as a worker for the same reason _handle_submission does:
+        the handler may end up awaiting push_screen_wait several calls
+        down (e.g. a future confirm/select dialog), which only works from
+        inside a worker context."""
+        await self._session._handle_extension_shortcut(key)
         self._update_footer()
 
     def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:

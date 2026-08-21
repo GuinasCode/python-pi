@@ -32,6 +32,7 @@ from pi_coding_agent.extensions.types import (
     ExtensionFlag,
     LoadExtensionsResult,
     RegisteredCommand,
+    RegisteredShortcut,
 )
 
 __all__ = ["ExtensionRunner"]
@@ -84,6 +85,13 @@ class ExtensionRunner:
     def get_commands(self) -> list[RegisteredCommand]:
         """Every slash command registered by every successfully loaded extension."""
         return [command for ext in self._result.extensions for command in ext.commands]
+
+    def get_shortcuts(self) -> list[RegisteredShortcut]:
+        """Every keybinding registered by every successfully loaded
+        extension, in load order — a later extension's shortcut on the
+        same key does not replace an earlier one; the T3 dispatcher fires
+        the first match, mirroring get_commands' load-order semantics."""
+        return [shortcut for ext in self._result.extensions for shortcut in ext.shortcuts]
 
     def get_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by every successfully loaded extension,

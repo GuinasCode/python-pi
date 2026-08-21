@@ -23,21 +23,28 @@ machinery needed — Python extensions just `import pi_ai`/`pi_coding_agent` dir
 reporting); the "Pi documentation" system-prompt section pointing at a bundled authoring
 guide + example; the event bus (`tool_call`/`tool_result`/agent+turn+session lifecycle —
 the highest-leverage subset of the original's 30+ event types, not all of them);
-`register_command`/`register_flag`+`get_flag`; `register_provider`/`unregister_provider`.
+`register_command`/`register_flag`+`get_flag`; `register_provider`/`unregister_provider`;
+`register_shortcut` (Textual-app only — see below).
 See the README's Extensions section for usage.
 
+The Textual app (`--ui-mode fullscreen`/`--alt`, `pi_coding_agent/tui_app.py`) is built up in
+phases (T0-T6, then G/H) on top of Textual 8.2.8 rather than a from-scratch port of the TS
+`packages/tui`. So far: T0 (app shell — transcript/input/footer, reusing
+`InteractiveSession` via an `OutputSink`), T1 (multi-line prompt editor), T2 (modal dialogs —
+`ConfirmDialog`, permission-mode confirmation), T3 (keybinding dispatcher — `PiApp.on_key`
+matches a pressed key against every `pi.register_shortcut()` registration and fires the first
+match; a no-op in the classic REPL, which has no dispatcher to call it from).
+
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- `register_shortcut` — needs a real keybinding dispatcher. `pi_tui`'s `raw_input.py` only
-  handles one hardcoded key (Shift+Tab for the permission-mode footer), not a general
-  registration/dispatch system.
 - Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets,
   autocomplete providers, custom editors) and the interactive TUI's own extension
-  management components (`extension-input`/`extension-editor`/`extension-selector`) — need
-  a widget/dialog/layout framework. Today's `pi_tui` is low-level terminal utilities only
-  (fuzzy search, kill ring, word navigation); `interactive_mode.py` is a plain
-  `rich.console.Console` REPL, not an alt-screen app with composable UI regions. Building
-  that framework is a separate, larger initiative in its own right — start there before
-  attempting these, not by half-wiring registration APIs with nothing real behind them.
+  management components (`extension-input`/`extension-editor`/`extension-selector`) — these
+  land as Phases T4-T6 (autocomplete/theme/footer-header widgets) then G/H (rendering hooks,
+  `ExtensionUIContext`) of the Textual-app work described above, once each has a concrete
+  Textual mechanism to sit on (T2's `ModalScreen` pattern already covers dialogs; T3's
+  dispatcher already covers shortcuts). The classic REPL (`interactive_mode.py`'s
+  `rich.console.Console` loop) stays untouched and is not getting this treatment — these
+  hooks are Textual-app-only, same as `register_shortcut`.
 
 ## Scope Reality Check
 

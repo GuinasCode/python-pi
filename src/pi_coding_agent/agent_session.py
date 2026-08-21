@@ -28,7 +28,13 @@ from pi_ai import (
     UserMessage,
 )
 from pi_ai.models import MutableModels
-from pi_coding_agent.extensions import ExtensionFlag, ExtensionRunner, LoadExtensionsResult, RegisteredCommand
+from pi_coding_agent.extensions import (
+    ExtensionFlag,
+    ExtensionRunner,
+    LoadExtensionsResult,
+    RegisteredCommand,
+    RegisteredShortcut,
+)
 from pi_coding_agent.extensions.events import (
     AgentEndEvent,
     AgentStartEvent,
@@ -380,6 +386,12 @@ class AgentSession:
         if self._extension_runner is None:
             return []
         return self._extension_runner.get_commands()
+
+    def get_extension_shortcuts(self) -> list[RegisteredShortcut]:
+        """Every keybinding registered by a loaded extension."""
+        if self._extension_runner is None:
+            return []
+        return self._extension_runner.get_shortcuts()
 
     def get_extension_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by a loaded extension."""

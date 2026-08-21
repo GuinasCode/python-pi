@@ -685,6 +685,26 @@ class InteractiveSession:
             return True
         return False
 
+    async def _handle_extension_shortcut(self, key: str) -> bool:
+        """Dispatch `key` (a Textual key-name, e.g. "ctrl+g") to the first
+        matching extension-registered shortcut, if any. Returns True if one
+        handled it (whether or not it printed anything), False if no
+        extension registered this key — the T3 keybinding dispatcher in
+        tui_app.py calls this from PiApp.on_key; the classic REPL has no
+        keybinding dispatcher to call it from."""
+        from pi_coding_agent.extensions.events import ExtensionContext
+
+        for registered in self._agent_session.get_extension_shortcuts():
+            if registered.key != key:
+                continue
+            result = registered.handler(ExtensionContext(cwd=self._cwd))
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, str) and result:
+                self._output.print(result)
+            return True
+        return False
+
     async def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
         cmd = command.lower().strip()

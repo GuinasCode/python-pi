@@ -222,6 +222,38 @@ class TestPiApp:
             assert "hello Bob" in _transcript_text(app)
 
     @pytest.mark.asyncio
+    async def test_extension_shortcut_is_dispatched_and_does_not_leak_into_the_editor(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "hotkey.py").write_text(
+            'def _on_hotkey(ctx):\n    return "hotkey fired"\n\n'
+            'def extension(pi):\n    pi.register_shortcut("ctrl+g", _on_hotkey)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.focus()
+            await pilot.press("ctrl+g")
+            await _settle(app, pilot)
+            assert "hotkey fired" in _transcript_text(app)
+            # the shortcut key must not also land in the focused editor
+            assert input_widget.text == ""
+
+    @pytest.mark.asyncio
+    async def test_unregistered_key_is_not_dispatched_as_a_shortcut(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.focus()
+            await pilot.press("g")
+            await _settle(app, pilot)
+            # with no extension registered, a plain key just types normally
+            assert input_widget.text == "g"
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call

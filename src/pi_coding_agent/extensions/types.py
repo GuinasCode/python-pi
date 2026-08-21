@@ -30,6 +30,7 @@ from pi_coding_agent.extensions.events import ExtensionContext, ExtensionHandler
 ExtensionFactory = Callable[["ExtensionAPI"], Any]
 
 CommandHandler = Callable[[str, ExtensionContext], "Any | Awaitable[Any]"]
+ShortcutHandler = Callable[[ExtensionContext], "Any | Awaitable[Any]"]
 
 
 @dataclass
@@ -38,6 +39,21 @@ class RegisteredCommand:
 
     name: str
     handler: CommandHandler
+    description: str | None = None
+
+
+@dataclass
+class RegisteredShortcut:
+    """A keybinding an extension registered via ``pi.register_shortcut``.
+
+    ``key`` uses Textual's key-name syntax (e.g. ``"ctrl+g"``, ``"f2"``) —
+    the same strings ``textual.binding.Binding`` accepts — since the T3
+    dispatcher that fires this handler is a thin layer over Textual's own
+    ``on_key``, not a separate parser.
+    """
+
+    key: str
+    handler: ShortcutHandler
     description: str | None = None
 
 
@@ -73,6 +89,7 @@ class LoadedExtension:
     handlers: dict[str, list[ExtensionHandler]] = field(default_factory=dict)
     commands: list[RegisteredCommand] = field(default_factory=list)
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
+    shortcuts: list[RegisteredShortcut] = field(default_factory=list)
 
     @property
     def tool_names(self) -> list[str]:
@@ -88,12 +105,12 @@ class LoadExtensionsResult:
 class ExtensionAPI:
     """The ``pi`` object passed to an extension's entry point.
 
-    Phase A/B/D/E/F surface: tool registration, event subscription, command
-    registration, flag declaration/reading, and provider registration.
-    Shortcut registration and rendering hooks are not implemented — see
-    ARCHITECTURE.md's extension-system status note for why (they need UI
-    infrastructure — a keybinding dispatcher, a widget/dialog system —
-    this port doesn't have yet).
+    Phase A/B/D/E/F/T3 surface: tool registration, event subscription,
+    command registration, shortcut registration, flag declaration/reading,
+    and provider registration. Rendering hooks (custom renderers, dialogs,
+    widgets, autocomplete providers) are not implemented yet — see
+    ARCHITECTURE.md's extension-system status note (Phase H needs the rest
+    of the Textual UI foundation, T4-T6, first).
     """
 
     def __init__(
@@ -104,6 +121,7 @@ class ExtensionAPI:
         self._tools: list[AgentTool] = []
         self._handlers: dict[str, list[ExtensionHandler]] = defaultdict(list)
         self._commands: list[RegisteredCommand] = []
+        self._shortcuts: list[RegisteredShortcut] = []
         self._flags: dict[str, ExtensionFlag] = {}
         # Shared with the owning ExtensionRunner (same dict object, not a
         # copy) so pi.get_flag() sees values the runner sets *after* this
@@ -150,6 +168,22 @@ class ExtensionAPI:
     @property
     def commands(self) -> list[RegisteredCommand]:
         return list(self._commands)
+
+    def register_shortcut(
+        self,
+        key: str,
+        handler: ShortcutHandler,
+        description: str | None = None,
+    ) -> None:
+        """Register a global keybinding. ``handler(ctx)`` runs when the
+        user presses ``key`` (a Textual key-name, e.g. ``"ctrl+g"``) in the
+        Textual app (``--ui-mode fullscreen``) — a no-op in the classic
+        REPL, which has no keybinding dispatcher to fire it from."""
+        self._shortcuts.append(RegisteredShortcut(key=key, handler=handler, description=description))
+
+    @property
+    def shortcuts(self) -> list[RegisteredShortcut]:
+        return list(self._shortcuts)
 
     def register_flag(
         self,

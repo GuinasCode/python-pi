@@ -212,6 +212,7 @@ def load_extensions(
                 tools=api.tools,
                 handlers=api.handlers,
                 commands=api.commands,
+                shortcuts=api.shortcuts,
                 flags=api.flags,
             )
         )
