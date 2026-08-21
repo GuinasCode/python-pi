@@ -13,16 +13,20 @@ plus the one extra control key. When stdin isn't a real TTY (piped input,
 tests), it falls back to a plain ``readline()`` with no cycle detection,
 matching how ``input()`` degrades in that situation.
 
-Shift+Tab is reported by terminals in two different shapes depending on
-platform:
-  - POSIX terminals (xterm and derivatives, most Linux/macOS terminals, and
-    Windows Terminal running a POSIX shell) send the CSI "backtab" sequence
-    ESC [ Z.
-  - The Windows console API (read via ``msvcrt``) never surfaces that ANSI
-    sequence — it reports Tab-family keys through the legacy two-byte
-    extended-key scheme (a NUL or 0xE0 lead byte followed by a scan code),
-    where Shift+Tab's scan code is 0x0F.
-Both are normalized to the same internal sentinel below.
+Shift+Tab is reported as the CSI "backtab" sequence ESC [ Z on both
+platforms, normalized to the same internal sentinel below:
+  - POSIX terminals (xterm and derivatives, most Linux/macOS terminals) send
+    it natively.
+  - Windows only sends it once the console is put in "virtual terminal
+    input" mode (``ENABLE_VIRTUAL_TERMINAL_INPUT``), which makes it translate
+    special keys to the same ANSI sequences POSIX terminals use, read via
+    ``ReadConsoleW``. This deliberately does *not* use ``msvcrt.getwch()``:
+    that call bypasses VT translation entirely and reports Tab-family keys
+    through the legacy two-byte "extended key" scheme (a NUL/0xE0 lead byte
+    then a BIOS scan code) — a scheme that, on modern console hosts
+    (Windows Terminal/ConPTY), frequently can't tell Shift+Tab apart from
+    plain Tab at all, since Tab already has its own ASCII value and isn't
+    routed through that extended-key path regardless of Shift.
 """
 
 from __future__ import annotations
@@ -84,20 +88,76 @@ def _edit_loop(read_key: Callable[[], str], on_cycle: Callable[[], None]) -> str
 
 if sys.platform == "win32":
     import contextlib
-    import msvcrt
+    import ctypes
+    from ctypes import wintypes
+
+    # (DWORD)-10, i.e. -10 as an unsigned 32-bit value — passing the literal
+    # -10 to GetStdHandle's DWORD argtype raises OverflowError in ctypes.
+    _STD_INPUT_HANDLE = 0xFFFFFFF6
+    _ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+    _WAIT_OBJECT_0 = 0
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    _kernel32.GetStdHandle.restype = wintypes.HANDLE
+    _kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.GetConsoleMode.restype = wintypes.BOOL
+    _kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.SetConsoleMode.restype = wintypes.BOOL
+    _kernel32.ReadConsoleW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _kernel32.ReadConsoleW.restype = wintypes.BOOL
+    _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+    def _console_input_handle() -> wintypes.HANDLE:
+        return _kernel32.GetStdHandle(_STD_INPUT_HANDLE)  # type: ignore[no-any-return]
 
     @contextlib.contextmanager
     def _raw_mode() -> Iterator[None]:
-        yield
+        handle = _console_input_handle()
+        old_mode = wintypes.DWORD()
+        _kernel32.GetConsoleMode(handle, ctypes.byref(old_mode))
+        # ENABLE_VIRTUAL_TERMINAL_INPUT and nothing else — every line/echo/
+        # signal-processing bit off, the Windows analog of tty.setraw's
+        # ~(ICANON|ECHO|ISIG) below. Turning off "processed input" also
+        # means Ctrl+C arrives as a literal \x03 byte instead of the console
+        # generating its own break signal, matching _edit_loop's explicit
+        # \x03 handling and the POSIX raw-mode behavior it mirrors.
+        _kernel32.SetConsoleMode(handle, wintypes.DWORD(_ENABLE_VIRTUAL_TERMINAL_INPUT))
+        try:
+            yield
+        finally:
+            _kernel32.SetConsoleMode(handle, old_mode)
+
+    def _read_console_char() -> str:
+        buf = ctypes.create_unicode_buffer(1)
+        n_read = wintypes.DWORD()
+        ok = _kernel32.ReadConsoleW(_console_input_handle(), buf, 1, ctypes.byref(n_read), None)
+        if not ok or n_read.value == 0:
+            return ""
+        return buf.value
+
+    def _console_char_ready(timeout: float) -> bool:
+        millis = max(0, int(timeout * 1000))
+        result: int = _kernel32.WaitForSingleObject(_console_input_handle(), wintypes.DWORD(millis))
+        return result == _WAIT_OBJECT_0
 
     def _read_key() -> str:
-        ch = msvcrt.getwch()
-        if ch in ("\x00", "\xe0"):
-            code = msvcrt.getwch()
-            if code == "\x0f":  # Shift+Tab scan code
-                return _BACKTAB
-            return ""  # unhandled extended key (arrows, F-keys, ...)
-        return ch
+        ch = _read_console_char()
+        if ch != "\x1b":
+            return ch
+        seq = ch
+        for _ in range(2):
+            if not _console_char_ready(0.05):
+                break
+            seq += _read_console_char()
+        return seq
 
 else:
     import contextlib

@@ -1,11 +1,19 @@
-"""Tests for pi_tui.raw_input's platform-independent edit loop.
+"""Tests for pi_tui.raw_input's platform-independent edit loop, plus (on
+Windows) the real key-reading primitives.
 
-Exercises _edit_loop directly with a fake key source, so these tests never
-touch a real TTY / termios / msvcrt.
+The _edit_loop tests exercise it directly with a fake key source, so they
+never touch a real TTY / termios / the Windows console API. The
+TestWindowsReadKey class below is different: it calls the *real*
+_read_key(), but with its two low-level primitives (_read_console_char,
+_console_char_ready) monkeypatched — this is the seam that lets the
+escape-sequence assembly logic (does ESC + '[' + 'Z' really become
+_BACKTAB?) get verified without a real console, closing the "zero test
+coverage" gap on this platform's key detection.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 import pytest
@@ -62,3 +70,42 @@ class TestEditLoop:
     def test_empty_key_from_discarded_extended_key_is_ignored(self) -> None:
         result = _edit_loop(_keys("", "x", "\n"), on_cycle=lambda: None)
         assert result == "x"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="exercises the Windows-only ReadConsoleW-based _read_key")
+class TestWindowsReadKey:
+    """These call the real pi_tui.raw_input._read_key — only its two
+    low-level char-source primitives are faked — to verify the fix for
+    Shift+Tab not being detected: the Windows console only reports it as
+    the same ESC [ Z sequence POSIX terminals send once
+    ENABLE_VIRTUAL_TERMINAL_INPUT is on, read char-by-char via ReadConsoleW.
+    msvcrt.getwch()'s legacy two-byte extended-key scheme (the previous
+    implementation) bypasses that translation and can't reliably tell
+    Shift+Tab apart from plain Tab on modern console hosts.
+    """
+
+    def test_escape_then_bracket_then_z_is_backtab(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_tui.raw_input as raw_input
+
+        chars = iter(["\x1b", "[", "Z"])
+        monkeypatch.setattr(raw_input, "_read_console_char", lambda: next(chars))
+        monkeypatch.setattr(raw_input, "_console_char_ready", lambda _timeout: True)
+        assert raw_input._read_key() == _BACKTAB
+
+    def test_plain_char_is_returned_immediately_without_peeking(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_tui.raw_input as raw_input
+
+        monkeypatch.setattr(raw_input, "_read_console_char", lambda: "x")
+
+        def _fail_ready(_timeout: float) -> bool:
+            raise AssertionError("a plain char must not trigger the escape-sequence peek")
+
+        monkeypatch.setattr(raw_input, "_console_char_ready", _fail_ready)
+        assert raw_input._read_key() == "x"
+
+    def test_lone_escape_with_nothing_following_is_returned_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_tui.raw_input as raw_input
+
+        monkeypatch.setattr(raw_input, "_read_console_char", lambda: "\x1b")
+        monkeypatch.setattr(raw_input, "_console_char_ready", lambda _timeout: False)
+        assert raw_input._read_key() == "\x1b"
