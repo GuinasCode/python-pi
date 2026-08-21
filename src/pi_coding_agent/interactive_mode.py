@@ -771,6 +771,26 @@ class InteractiveSession:
             return True
         return False
 
+    def _resolve_model(self, query: str) -> Model | None:
+        """Find a model by "<id>" (searched across every configured
+        provider) or "<provider>/<id>" (unambiguous, for when two
+        providers happen to share a model id) — the argument form
+        `/model <query>` accepts."""
+        if "/" in query:
+            provider_id, _, model_id = query.partition("/")
+            provider = self._models.get_provider(provider_id)
+            if provider is None:
+                return None
+            for model in provider.get_models():
+                if model.id == model_id:
+                    return model
+            return None
+        for provider in self._models.get_providers():
+            for model in provider.get_models():
+                if model.id == query:
+                    return model
+        return None
+
     async def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
         cmd = command.lower().strip()
@@ -783,7 +803,7 @@ class InteractiveSession:
                 "\n[bold]Commands[/bold]\n"
                 f"  [{PASTEL_BLUE}]/help[/{PASTEL_BLUE}]     Show this help\n"
                 f"  [{PASTEL_BLUE}]/exit[/{PASTEL_BLUE}]     Exit Pi\n"
-                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Show current model and list available providers/models\n"
+                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    List providers/models; /model <id> to switch\n"
                 f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
@@ -791,7 +811,23 @@ class InteractiveSession:
             )
             return True
 
-        if cmd == "/model":
+        if cmd == "/model" or cmd.startswith("/model "):
+            # Args from the original (non-lowercased) command — model IDs
+            # can be case-sensitive, unlike the command name itself.
+            args_text = command[len("/model") :].strip()
+            if args_text:
+                target = self._resolve_model(args_text)
+                if target is None:
+                    self._output.print(f"[{PASTEL_RED}]no such model:[/{PASTEL_RED}] {escape(args_text)}")
+                else:
+                    self._model = target
+                    self._agent_session.set_model(target)
+                    self._output.print(
+                        f"[{PASTEL_GREEN}]switched to[/{PASTEL_GREEN}] "
+                        f"[{PASTEL_BLUE}]{escape(target.provider)}/{escape(target.id)}[/{PASTEL_BLUE}]"
+                    )
+                return True
+
             current_provider = getattr(self._model, "provider", None)
             current_id = getattr(self._model, "id", None)
             lines = [
@@ -812,6 +848,8 @@ class InteractiveSession:
                     is_current = provider.id == current_provider and model.id == current_id
                     marker = f" [{PASTEL_GREEN}]*[/{PASTEL_GREEN}]" if is_current else ""
                     lines.append(f"  [{PASTEL_BLUE}]{escape(model.id)}[/{PASTEL_BLUE}]{marker}")
+            lines.append("")
+            lines.append("[dim]/model <id> or /model <provider>/<id> to switch[/dim]")
             self._output.print("\n".join(lines))
             return True
 

@@ -433,6 +433,17 @@ class AgentSession:
         if self._extension_runner is not None:
             self._extension_runner.set_flag_value(name, value)
 
+    def get_model(self) -> Model:
+        """The model currently used for streaming."""
+        return self._model
+
+    def set_model(self, model: Model) -> None:
+        """Switch the model used for streaming from this point on (e.g.
+        from the REPL's /model <id> command). Takes effect on the next
+        prompt() call — mid-turn, the current turn keeps using whichever
+        model it already started with."""
+        self._model = model
+
     def get_last_assistant_text(self) -> str:
         """Concatenated text of the most recent assistant message, or ''."""
         for message in reversed(self._messages):

@@ -105,6 +105,55 @@ def test_interactive_slash_model_lists_every_provider_and_its_models(tmp_path: P
     assert "acme-small" in output
 
 
+def test_interactive_slash_model_with_id_switches_the_active_model(tmp_path: Path) -> None:
+    """/model used to be read-only — /model <id> now actually switches,
+    both the REPL's own self._model and the underlying AgentSession's
+    (which is what actually gets streamed against)."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    extra_provider: Provider[str] = Provider(
+        id="acme", name="Acme AI", models=[Model(id="acme-large", provider="acme")]
+    )
+    session._models.set_provider(extra_provider)
+
+    assert asyncio.run(session._handle_command("/model acme-large")) is True
+    assert session._model.id == "acme-large"
+    assert session._agent_session.get_model().id == "acme-large"
+
+
+def test_interactive_slash_model_with_provider_slash_id_switches(tmp_path: Path) -> None:
+    """The provider/id form disambiguates two providers that happen to
+    share a model id."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    session._models.set_provider(Provider(id="acme", name="Acme AI", models=[Model(id="shared-id", provider="acme")]))
+    session._models.set_provider(
+        Provider(id="other", name="Other AI", models=[Model(id="shared-id", provider="other")])
+    )
+
+    assert asyncio.run(session._handle_command("/model other/shared-id")) is True
+    assert session._model.provider == "other"
+
+
+def test_interactive_slash_model_with_unknown_id_reports_error_and_does_not_switch(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    original = session._model
+    printed: list[str] = []
+
+    def _record_print(markup: str = "", *, end: str = "\n") -> None:
+        printed.append(markup)
+
+    session._output.print = _record_print  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model does-not-exist")) is True
+    assert session._model is original
+    assert "no such model" in "\n".join(printed)
+
+
 def test_interactive_slash_clear(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     assert asyncio.run(session._handle_command("/clear")) is True
