@@ -8,12 +8,13 @@ instead of duplicating that logic for a second front-end. The classic
 REPL (``interactive_mode.repl_loop``) is untouched and stays the default;
 this is opt-in via ``--ui-mode fullscreen``/``--alt`` while it matures.
 
-Scope for T0/T1/T2/T3 so far: the app shell (transcript + input + footer),
+Scope for T0-T4 so far: the app shell (transcript + input + footer),
 streaming turn rendering, slash commands (including extension-registered
 ones), a real multi-line prompt editor, permission-mode confirmation via a
-modal dialog (Phase T2), and a keybinding dispatcher for
-extension-registered shortcuts (Phase T3). Deliberately NOT wired yet:
-rendering hooks (Phases T4-T6, G, H).
+modal dialog (Phase T2), a keybinding dispatcher for extension-registered
+shortcuts (Phase T3), and a slash-command autocomplete popup (Phase T4).
+Deliberately NOT wired yet: theme/footer-header customization and
+rendering hooks (Phases T5-T6, G, H).
 """
 
 from __future__ import annotations
@@ -25,9 +26,10 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
 
 from pi_ai import StopReason
+from pi_coding_agent.autocomplete import command_suggestions
 from pi_coding_agent.dialogs import ConfirmDialog
 from pi_coding_agent.interactive_mode import InteractiveSession, _fmt_args
 from pi_coding_agent.permission_mode import permission_mode_label
@@ -86,6 +88,13 @@ class PiApp(App[None]):
         padding: 0 1;
         background: $panel;
     }
+    #suggestions {
+        dock: bottom;
+        height: auto;
+        max-height: 6;
+        border: solid $accent;
+        display: none;
+    }
     #prompt-input {
         dock: bottom;
         height: 3;
@@ -109,6 +118,7 @@ class PiApp(App[None]):
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="transcript")
         yield Static(id="status-footer")
+        yield OptionList(id="suggestions")
         yield PromptTextArea(id="prompt-input")
 
     def on_mount(self) -> None:
@@ -136,19 +146,72 @@ class PiApp(App[None]):
         self._session._cycle_permission_mode()
         self._update_footer()
 
+    def on_text_area_changed(self, event: PromptTextArea.Changed) -> None:
+        """Phase T4: recompute the slash-command suggestion popup on every
+        keystroke in the prompt editor."""
+        if event.text_area.id != "prompt-input":
+            return
+        extension_names = [c.name for c in self._session._agent_session.get_extension_commands()]
+        matches = command_suggestions(event.text_area.text, extension_names)
+        suggestions = self.query_one("#suggestions", OptionList)
+        if not matches:
+            suggestions.display = False
+            return
+        suggestions.clear_options()
+        suggestions.add_options(matches)
+        suggestions.highlighted = 0
+        suggestions.display = True
+
+    def _hide_suggestions(self) -> None:
+        self.query_one("#suggestions", OptionList).display = False
+
     def on_key(self, event: events.Key) -> None:
-        """Phase T3 keybinding dispatcher: fire a matching
-        extension-registered shortcut (``pi.register_shortcut``) before the
-        key reaches whatever widget is focused — e.g. so a shortcut key
-        doesn't also get typed as a literal character into the prompt
-        editor. A no-op check on every keystroke when no extension
-        registered any shortcuts, which is the common case.
+        """Phase T3/T4 keyboard dispatch, checked before the key reaches
+        whatever widget is focused:
+
+        1. Autocomplete popup controls (Tab accepts, Escape dismisses, Up/
+           Down move the highlight) when the popup (Phase T4) is visible —
+           these must win over the prompt editor's own handling of those
+           keys (e.g. Tab would otherwise move focus).
+        2. A matching extension-registered shortcut (Phase T3) — e.g. so a
+           shortcut key doesn't also get typed as a literal character into
+           the prompt editor.
+
+        A no-op on every other keystroke, which is the common case (no
+        popup open, no extension shortcuts registered).
         """
+        suggestions = self.query_one("#suggestions", OptionList)
+        if suggestions.display:
+            if event.key == "tab" and suggestions.highlighted is not None:
+                event.stop()
+                event.prevent_default()
+                option = suggestions.get_option_at_index(suggestions.highlighted)
+                self._accept_suggestion(str(option.prompt))
+                return
+            if event.key == "escape":
+                event.stop()
+                event.prevent_default()
+                self._hide_suggestions()
+                return
+            if event.key in ("up", "down") and suggestions.option_count:
+                event.stop()
+                event.prevent_default()
+                current = suggestions.highlighted or 0
+                step = -1 if event.key == "up" else 1
+                suggestions.highlighted = (current + step) % suggestions.option_count
+                return
+
         if not any(s.key == event.key for s in self._session._agent_session.get_extension_shortcuts()):
             return
         event.stop()
         event.prevent_default()
         self._dispatch_shortcut(event.key)
+
+    def _accept_suggestion(self, command: str) -> None:
+        input_widget = self.query_one("#prompt-input", PromptTextArea)
+        input_widget.text = f"{command} "
+        input_widget.move_cursor(input_widget.document.end)
+        self._hide_suggestions()
 
     @work(exclusive=True)
     async def _dispatch_shortcut(self, key: str) -> None:

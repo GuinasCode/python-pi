@@ -15,7 +15,7 @@ import pytest
 from rich.console import Console
 from textual.containers import VerticalScroll
 from textual.pilot import Pilot
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
 
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
@@ -252,6 +252,80 @@ class TestPiApp:
             await _settle(app, pilot)
             # with no extension registered, a plain key just types normally
             assert input_widget.text == "g"
+
+    @pytest.mark.asyncio
+    async def test_typing_a_slash_command_prefix_shows_matching_suggestions(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/mo"
+            await pilot.pause()
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is True
+            assert str(suggestions.get_option_at_index(0).prompt) == "/model"
+
+    @pytest.mark.asyncio
+    async def test_suggestions_hide_once_the_text_no_longer_matches(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/mo"
+            await pilot.pause()
+            input_widget.text = "hello"
+            await pilot.pause()
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is False
+
+    @pytest.mark.asyncio
+    async def test_tab_accepts_the_highlighted_suggestion(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.focus()
+            input_widget.text = "/mo"
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert input_widget.text == "/model "
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is False
+
+    @pytest.mark.asyncio
+    async def test_escape_dismisses_the_suggestion_popup_without_changing_text(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.focus()
+            input_widget.text = "/mo"
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert input_widget.text == "/mo"
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is False
+
+    @pytest.mark.asyncio
+    async def test_extension_commands_are_included_in_suggestions(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "greet.py").write_text(
+            'def _greet(args_text, ctx):\n    return "hi"\n\n'
+            'def extension(pi):\n    pi.register_command("greet", _greet)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/gr"
+            await pilot.pause()
+            suggestions = app.query_one("#suggestions", OptionList)
+            assert suggestions.display is True
+            assert str(suggestions.get_option_at_index(0).prompt) == "/greet"
 
     @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:

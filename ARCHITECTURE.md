@@ -33,16 +33,22 @@ phases (T0-T6, then G/H) on top of Textual 8.2.8 rather than a from-scratch port
 `InteractiveSession` via an `OutputSink`), T1 (multi-line prompt editor), T2 (modal dialogs —
 `ConfirmDialog`, permission-mode confirmation), T3 (keybinding dispatcher — `PiApp.on_key`
 matches a pressed key against every `pi.register_shortcut()` registration and fires the first
-match; a no-op in the classic REPL, which has no dispatcher to call it from).
+match; a no-op in the classic REPL, which has no dispatcher to call it from), T4 (slash-command
+autocomplete — an `OptionList` popup driven by plain prefix matching over built-in and
+extension-registered command names, since Textual's `Suggester` only attaches to `Input`, not
+the `TextArea` the prompt editor is built on; Tab accepts, Escape dismisses, Up/Down move the
+highlight).
 
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets,
-  autocomplete providers, custom editors) and the interactive TUI's own extension
-  management components (`extension-input`/`extension-editor`/`extension-selector`) — these
-  land as Phases T4-T6 (autocomplete/theme/footer-header widgets) then G/H (rendering hooks,
-  `ExtensionUIContext`) of the Textual-app work described above, once each has a concrete
-  Textual mechanism to sit on (T2's `ModalScreen` pattern already covers dialogs; T3's
-  dispatcher already covers shortcuts). The classic REPL (`interactive_mode.py`'s
+- Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets, custom
+  autocomplete providers wired to `pi.addAutocompleteProvider`, custom editors) and the
+  interactive TUI's own extension management components
+  (`extension-input`/`extension-editor`/`extension-selector`) — these land as Phases T5-T6
+  (theme/footer-header widgets) then G/H (rendering hooks, `ExtensionUIContext`) of the
+  Textual-app work described above, once each has a concrete Textual mechanism to sit on (T2's
+  `ModalScreen` pattern already covers dialogs; T3's dispatcher already covers shortcuts; T4's
+  popup already covers the autocomplete *mechanism*, extension-supplied providers are a Phase
+  H wiring exercise on top of it). The classic REPL (`interactive_mode.py`'s
   `rich.console.Console` loop) stays untouched and is not getting this treatment — these
   hooks are Textual-app-only, same as `register_shortcut`.
 
