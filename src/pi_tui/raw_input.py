@@ -7,11 +7,24 @@ just treats it as Tab). To let Shift+Tab drive the permission-mode toggle
 message, we read raw keys ourselves.
 
 This is deliberately minimal — no history, no cursor movement/left-right
-editing, no multi-line wrapping awareness — just enough line editing
-(printable chars, backspace, enter, Ctrl+C, Ctrl+D) to replace ``input()``,
-plus the one extra control key. When stdin isn't a real TTY (piped input,
-tests), it falls back to a plain ``readline()`` with no cycle detection,
-matching how ``input()`` degrades in that situation.
+editing — just enough line editing (printable chars, backspace, enter,
+Ctrl+C, Ctrl+D) to replace ``input()``, plus the one extra control key.
+When stdin isn't a real TTY (piped input, tests), it falls back to a
+plain ``readline()`` with no cycle detection, matching how ``input()``
+degrades in that situation.
+
+Unlike a typical line editor, this one doesn't echo characters itself —
+every buffer mutation (character typed, backspace) and every Shift+Tab
+calls the caller's ``on_render(current_text)``, handing it full control
+of what gets drawn. That split exists because the caller (interactive
+mode) shows a live status footer right below the input, and the input
+itself can wrap across multiple terminal rows once it's long enough —
+patching the screen incrementally in place while tracking exactly how
+many rows the wrapped input currently occupies is fragile row-arithmetic
+that isn't this module's job to get right; letting the caller redraw
+everything from a fixed anchor on every keystroke sidesteps needing that
+arithmetic at all, at a cost (a full repaint per keystroke) a human's
+typing rate makes unnoticeable.
 
 Shift+Tab is reported as the CSI "backtab" sequence ESC [ Z on both
 platforms, normalized to the same internal sentinel below:
@@ -37,43 +50,40 @@ from collections.abc import Callable, Iterator
 _BACKTAB = "\x1b[Z"
 
 
-def _edit_loop(read_key: Callable[[], str], on_cycle: Callable[[], None]) -> str:
+def _edit_loop(
+    read_key: Callable[[], str],
+    on_render: Callable[[str], None],
+    on_cycle: Callable[[], None],
+) -> str:
     """Core line-editing loop, decoupled from the platform key source so it
-    can be unit-tested with a fake ``read_key``."""
+    can be unit-tested with a fake ``read_key``. Terminal writes here are
+    limited to what submitting/interrupting needs — everything about
+    what's currently on screen while the user is still typing is the
+    caller's ``on_render``, not this loop's."""
     buf: list[str] = []
     while True:
         key = read_key()
 
         if key in ("\r", "\n"):
-            # Explicit \r\n, not just \n: correct in raw mode (see _raw_mode
-            # below, POSIX uses tty.setraw which disables OPOST/ONLCR, so a
-            # bare \n would move the cursor down without returning to
-            # column 0) and harmless in cooked mode (an extra \r is a no-op).
-            sys.stdout.write("\r\n")
-            sys.stdout.flush()
             return "".join(buf)
 
         if key == "\x03":  # Ctrl+C
-            sys.stdout.write("\r\n")
-            sys.stdout.flush()
             raise KeyboardInterrupt
 
         if key == "\x04":  # Ctrl+D
             if not buf:
-                sys.stdout.write("\r\n")
-                sys.stdout.flush()
                 raise EOFError
             continue
 
         if key in ("\x7f", "\x08"):  # Backspace
             if buf:
                 buf.pop()
-                sys.stdout.write("\b \b")
-                sys.stdout.flush()
+                on_render("".join(buf))
             continue
 
         if key == _BACKTAB:
             on_cycle()
+            on_render("".join(buf))
             continue
 
         if not key or key == "\t" or key.startswith("\x1b"):
@@ -82,8 +92,7 @@ def _edit_loop(read_key: Callable[[], str], on_cycle: Callable[[], None]) -> str
             continue
 
         buf.append(key)
-        sys.stdout.write(key)
-        sys.stdout.flush()
+        on_render("".join(buf))
 
 
 if sys.platform == "win32":
@@ -193,19 +202,29 @@ else:
         return seq
 
 
-def read_line_with_cycle(prompt: str, *, on_cycle: Callable[[], None]) -> str:
-    """Read one line of input, calling ``on_cycle()`` each time Shift+Tab is
-    pressed (without submitting). Raises ``KeyboardInterrupt`` on Ctrl+C and
-    ``EOFError`` on Ctrl+D at an empty line — same contract as ``input()``.
+def read_line_with_cycle(
+    prompt: str,
+    *,
+    on_render: Callable[[str], None],
+    on_cycle: Callable[[], None],
+) -> str:
+    """Read one line of input, calling ``on_render(current_text)`` after
+    every keystroke (initially with ``""``, before the user has typed
+    anything) so the caller can draw the prompt/text/any live status
+    around it, and ``on_cycle()`` each time Shift+Tab is pressed (without
+    submitting). Raises ``KeyboardInterrupt`` on Ctrl+C and ``EOFError`` on
+    Ctrl+D at an empty line — same contract as ``input()``.
     """
-    sys.stdout.write(prompt)
-    sys.stdout.flush()
-
     if not sys.stdin.isatty():
+        # No live rendering possible for piped input — same plain prompt
+        # input() itself would write in this situation.
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
         line = sys.stdin.readline()
         if line == "":
             raise EOFError
         return line.rstrip("\n")
 
+    on_render("")
     with _raw_mode():
-        return _edit_loop(_read_key, on_cycle)
+        return _edit_loop(_read_key, on_render, on_cycle)

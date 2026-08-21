@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import re
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import patch
+
+import pytest
+from rich.console import Console
 
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
@@ -288,3 +293,66 @@ class TestRenderingHooksIntegration:
 
         session._handle_event(_Event())
         assert printed == ["[custom] starting write"]
+
+
+class TestPromptInputFullRedraw:
+    """_prompt_input's live footer used to corrupt the screen once typed
+    input wrapped past one terminal row (fixed row-offset assumptions
+    baked in when the footer was first drawn stopped matching reality as
+    soon as the input grew past that). It now fully repaints, anchored at
+    a saved cursor position, on every keystroke instead — these drive that
+    through a fake read_line_with_cycle and check the escape sequences it
+    writes are well-formed (in particular, every absolute-column request
+    stays within [1, terminal width], the bug's telltale symptom when it
+    regresses)."""
+
+    @staticmethod
+    def _run_with_fake_input(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, width: int, renders: list[str]
+    ) -> tuple[str, str]:
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=width, force_terminal=True))
+
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+            on_render("")
+            for text in renders:
+                on_render(text)
+            on_cycle()
+            on_render(renders[-1] if renders else "")
+            return renders[-1] if renders else ""
+
+        monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+
+        result = asyncio.run(session._prompt_input())
+        assert result is not None
+        return result, fake_stdout.getvalue()
+
+    def test_short_text_no_wrap(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        result, output = self._run_with_fake_input(monkeypatch, tmp_path, width=40, renders=["h", "hi"])
+        assert result == "hi"
+        self._assert_columns_in_range(output, width=40)
+
+    def test_long_text_wraps_across_multiple_rows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        long_text = "x" * 90  # several times a 20-column width, forces wrapping
+        result, output = self._run_with_fake_input(
+            monkeypatch, tmp_path, width=20, renders=["x", "xx", long_text, long_text[:-1]]
+        )
+        assert result == long_text[:-1]
+        self._assert_columns_in_range(output, width=20)
+
+    def test_text_exactly_a_multiple_of_width(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        exact_text = "y" * 40  # (prompt "> " + 38 chars) lands short of a clean check either way
+        result, output = self._run_with_fake_input(monkeypatch, tmp_path, width=20, renders=[exact_text])
+        assert result == exact_text
+        self._assert_columns_in_range(output, width=20)
+
+    @staticmethod
+    def _assert_columns_in_range(output: str, *, width: int) -> None:
+        columns = [int(n) for n in re.findall(r"\x1b\[(\d+)G", output)]
+        assert columns, "expected at least one absolute-column cursor move"
+        assert all(1 <= c <= width for c in columns), columns

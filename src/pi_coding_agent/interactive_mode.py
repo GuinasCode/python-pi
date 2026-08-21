@@ -577,36 +577,23 @@ class InteractiveSession:
             return None
         return f"[{DIM_STYLE}]{escape(line)}[/{DIM_STYLE}]"
 
-    def _redraw_footer(self, *, has_repo_line: bool) -> None:
-        """Re-render the state/mode[/repo] lines below the input row in
-        place, without disturbing the cursor position or the text being
-        typed above them. Called as the Shift+Tab handler from inside
-        _edit_loop, so it must not print anything that could scroll the
-        screen — only reposition within rows already drawn by _prompt_input.
-        """
-        sys.stdout.write("\x1b7")  # DECSC: save cursor position
-        sys.stdout.write("\x1b[2B\r\x1b[2K")  # down to the state-line row, clear it
-        sys.stdout.flush()
-        _console.print(self._state_line(), end="")
-        sys.stdout.write("\x1b[1B\r\x1b[2K")
-        sys.stdout.flush()
-        _console.print(self._mode_line(), end="")
-        if has_repo_line:
-            repo_line = self._repo_line()
-            if repo_line:
-                sys.stdout.write("\x1b[1B\r\x1b[2K")
-                sys.stdout.flush()
-                _console.print(repo_line, end="")
-        sys.stdout.write("\x1b8")  # DECRC: restore cursor position
-        sys.stdout.flush()
-
     async def _prompt_input(self) -> str | None:
         """Draw the bordered input area with a live footer, return stripped text or None on exit.
 
-        The footer (state / permission mode / repo:branch) is drawn once
-        below the input row before typing starts, then the cursor hops back
-        up so the prompt lands on the input row. Shift+Tab redraws the
-        footer in place via _redraw_footer while the cursor stays put.
+        The whole block (prompt + typed text + bottom rule + state/mode
+        [/repo] lines) is fully redrawn, anchored at a cursor position
+        saved once before typing starts, on every keystroke — not just
+        when Shift+Tab is pressed. That's a deliberate trade: input can
+        wrap across multiple terminal rows once it's long enough (the
+        terminal does this on its own), and the footer sits immediately
+        below it — incrementally patching the screen in place while
+        tracking exactly how many rows the wrapped input currently
+        occupies is fragile row-arithmetic that used to corrupt the
+        display (new characters landing on top of already-drawn footer
+        text once input grew past one row, since the footer's position
+        was computed once up front assuming it never would). A full
+        repaint from a fixed anchor sidesteps needing that arithmetic at
+        all, and a human's typing rate makes it unnoticeable.
         """
         w = _console.width
 
@@ -614,46 +601,67 @@ class InteractiveSession:
         tips = "/help  /clear  /model  /session  /exit"
         _console.print(f"[{DIM_STYLE}]{tips}[/{DIM_STYLE}]")
 
-        # Top rule — plain horizontal line spanning the terminal width
-        sys.stdout.write("─" * w + "\n")
+        # Top rule — plain horizontal line spanning the terminal width.
+        # \r\n (not bare \n): this runs before _raw_mode is entered inside
+        # read_line_with_cycle, but _render below also writes during raw
+        # mode, where ONLCR is off — using \r\n unconditionally everywhere
+        # in this method keeps its behavior identical in both cases rather
+        # than depending on which mode happens to be active when it runs.
+        sys.stdout.write("─" * w + "\r\n")
         sys.stdout.flush()
 
         repo_line = self._repo_line()
         footer_rows = 3 + (1 if repo_line else 0)  # bottom rule + state + mode [+ repo]
 
-        # Draw the footer below the (still-empty) input row now, so it's
-        # visible immediately and shift+tab can update it live while typing.
-        sys.stdout.write("\n" + "─" * w + "\n")
-        sys.stdout.flush()
-        _console.print(self._state_line())
-        _console.print(self._mode_line())
-        if repo_line:
-            _console.print(repo_line)
+        prompt = "\033[1m>\033[0m "
+        prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
 
-        # Hop back up to the (blank) input row, column 0, for the prompt.
-        sys.stdout.write(f"\x1b[{footer_rows + 1}A")
+        # Anchor: the still-blank row input is about to start on. _render
+        # always restores to here first, then redraws everything below.
+        sys.stdout.write("\x1b7")  # DECSC
         sys.stdout.flush()
+
+        def _render(text: str) -> None:
+            sys.stdout.write("\x1b8")  # DECRC: back to the anchor
+            sys.stdout.write("\x1b[0J")  # wipe any longer previous render
+            sys.stdout.write(prompt + text)
+            footer_lines = [self._state_line(), self._mode_line()]
+            if repo_line:
+                footer_lines.append(repo_line)
+            with _console.capture() as capture:
+                _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
+            sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
+            # Back up past the footer to the end of the text just printed
+            # — always the *last* input row, since this editor has no
+            # left/right cursor movement, only append/backspace-from-end.
+            sys.stdout.write(f"\x1b[{footer_rows}A")
+            # Column right after the last character written, on whichever
+            # wrapped row that char landed on. -1/+2 (not +1): CHA columns
+            # are 1-indexed, and this is the column *after* the total-th
+            # char, not the column the char itself is on. min(..., w):
+            # clamps the rare exact-multiple-of-w case (cursor "pending
+            # wrap" at the row boundary) to the last column instead of
+            # requesting a nonexistent column w+1.
+            total = prompt_visible_len + len(text)
+            end_col = min(((total - 1) % w) + 2, w)
+            sys.stdout.write(f"\x1b[{end_col}G")
+            sys.stdout.flush()
 
         def on_cycle() -> None:
             self._cycle_permission_mode()
-            self._redraw_footer(has_repo_line=bool(repo_line))
 
         def land_below_footer() -> None:
-            # A real "\n" for the last step (not another CSI-B) so the
+            # A real \r\n for the last step (not another CSI-B) so the
             # terminal scrolls if the footer was sitting at the bottom of
             # the visible viewport — cursor-only movement would just clamp
             # there instead of producing a fresh line to print into.
-            if footer_rows > 1:
-                sys.stdout.write(f"\x1b[{footer_rows - 1}B")
-            sys.stdout.write("\n")
+            sys.stdout.write(f"\x1b[{footer_rows}B\r\n")
             sys.stdout.flush()
 
-        # Input line — the terminal wraps long input across multiple lines
-        # on its own, so the rule above/below grows with the input naturally.
         try:
             raw = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: read_line_with_cycle("\033[1m>\033[0m ", on_cycle=on_cycle),
+                lambda: read_line_with_cycle(prompt, on_render=_render, on_cycle=on_cycle),
             )
         except EOFError:
             land_below_footer()

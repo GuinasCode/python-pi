@@ -26,50 +26,86 @@ def _keys(*sequence: str) -> Callable[[], str]:
     return lambda: next(it)
 
 
+def _recorder() -> tuple[Callable[[str], None], list[str]]:
+    """A fake on_render that just remembers what it was called with, in
+    order — enough to check _edit_loop calls it exactly when the buffer
+    actually changes, without needing a real terminal."""
+    calls: list[str] = []
+    return calls.append, calls
+
+
 class TestEditLoop:
     def test_returns_typed_text_on_enter(self) -> None:
-        result = _edit_loop(_keys("h", "i", "\n"), on_cycle=lambda: None)
+        render, _ = _recorder()
+        result = _edit_loop(_keys("h", "i", "\n"), render, on_cycle=lambda: None)
         assert result == "hi"
 
+    def test_render_is_called_after_every_character(self) -> None:
+        render, calls = _recorder()
+        _edit_loop(_keys("h", "i", "\n"), render, on_cycle=lambda: None)
+        assert calls == ["h", "hi"]
+
     def test_backspace_removes_last_char(self) -> None:
-        result = _edit_loop(_keys("h", "i", "\x7f", "\n"), on_cycle=lambda: None)
+        render, calls = _recorder()
+        result = _edit_loop(_keys("h", "i", "\x7f", "\n"), render, on_cycle=lambda: None)
         assert result == "h"
+        assert calls == ["h", "hi", "h"]
 
     def test_backspace_on_empty_buffer_is_noop(self) -> None:
-        result = _edit_loop(_keys("\x7f", "h", "\n"), on_cycle=lambda: None)
+        render, calls = _recorder()
+        result = _edit_loop(_keys("\x7f", "h", "\n"), render, on_cycle=lambda: None)
         assert result == "h"
+        # the empty-buffer backspace above must not have triggered a render
+        assert calls == ["h"]
 
     def test_ctrl_c_raises_keyboard_interrupt(self) -> None:
+        render, _ = _recorder()
         with pytest.raises(KeyboardInterrupt):
-            _edit_loop(_keys("h", "\x03"), on_cycle=lambda: None)
+            _edit_loop(_keys("h", "\x03"), render, on_cycle=lambda: None)
 
     def test_ctrl_d_on_empty_buffer_raises_eof(self) -> None:
+        render, _ = _recorder()
         with pytest.raises(EOFError):
-            _edit_loop(_keys("\x04"), on_cycle=lambda: None)
+            _edit_loop(_keys("\x04"), render, on_cycle=lambda: None)
 
     def test_ctrl_d_on_nonempty_buffer_is_noop(self) -> None:
-        result = _edit_loop(_keys("h", "\x04", "i", "\n"), on_cycle=lambda: None)
+        render, _ = _recorder()
+        result = _edit_loop(_keys("h", "\x04", "i", "\n"), render, on_cycle=lambda: None)
         assert result == "hi"
 
     def test_backtab_invokes_on_cycle_without_submitting(self) -> None:
+        render, _ = _recorder()
         calls = []
-        result = _edit_loop(_keys("h", _BACKTAB, "i", "\n"), on_cycle=lambda: calls.append(1))
+        result = _edit_loop(_keys("h", _BACKTAB, "i", "\n"), render, on_cycle=lambda: calls.append(1))
         assert result == "hi"
         assert calls == [1]
 
+    def test_backtab_also_triggers_a_render(self) -> None:
+        render, calls = _recorder()
+        _edit_loop(_keys("h", _BACKTAB, "\n"), render, on_cycle=lambda: None)
+        # once for "h" being typed, once again for the backtab itself (the
+        # caller's on_cycle mutated state — e.g. permission mode — that the
+        # next render needs to reflect)
+        assert calls == ["h", "h"]
+
     def test_backtab_can_be_pressed_multiple_times(self) -> None:
+        render, _ = _recorder()
         calls = []
-        result = _edit_loop(_keys(_BACKTAB, _BACKTAB, _BACKTAB, "x", "\n"), on_cycle=lambda: calls.append(1))
+        result = _edit_loop(_keys(_BACKTAB, _BACKTAB, _BACKTAB, "x", "\n"), render, on_cycle=lambda: calls.append(1))
         assert result == "x"
         assert len(calls) == 3
 
     def test_plain_tab_and_unhandled_escape_are_ignored(self) -> None:
-        result = _edit_loop(_keys("\t", "\x1b", "\x1bOP", "x", "\n"), on_cycle=lambda: None)
+        render, calls = _recorder()
+        result = _edit_loop(_keys("\t", "\x1b", "\x1bOP", "x", "\n"), render, on_cycle=lambda: None)
         assert result == "x"
+        assert calls == ["x"]
 
     def test_empty_key_from_discarded_extended_key_is_ignored(self) -> None:
-        result = _edit_loop(_keys("", "x", "\n"), on_cycle=lambda: None)
+        render, calls = _recorder()
+        result = _edit_loop(_keys("", "x", "\n"), render, on_cycle=lambda: None)
         assert result == "x"
+        assert calls == ["x"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="exercises the Windows-only ReadConsoleW-based _read_key")
