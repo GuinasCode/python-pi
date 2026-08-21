@@ -39,6 +39,7 @@ from pi_coding_agent.diff_render import render_diff
 from pi_coding_agent.extensions import ExtensionRunner
 from pi_coding_agent.git_info import get_git_repo_line
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
+from pi_coding_agent.output_sink import ConsoleOutputSink, OutputSink
 from pi_coding_agent.permission_mode import (
     PermissionDecision,
     PermissionMode,
@@ -200,11 +201,17 @@ class InteractiveSession:
         config_dir: Path | None = None,
         session_manager: SessionManager | None = None,
         session_id: str | None = None,
+        output: OutputSink | None = None,
     ) -> None:
         self._models = models
         self._model = model
         self._cwd = cwd
         self._config_dir = config_dir or get_config_dir()
+        # Where run_turn()/_handle_command() render to. Defaults to the
+        # classic REPL's Console — the Textual app (--ui-mode fullscreen)
+        # passes its own sink so the exact same event/command handling
+        # renders into a transcript widget instead of straight to stdout.
+        self._output: OutputSink = output or ConsoleOutputSink(_console)
 
         resources = load_resources(cwd, self._config_dir)
 
@@ -223,7 +230,7 @@ class InteractiveSession:
         # Cyclable permission mode (shift+tab), shown in the footer and
         # enforced via _permission_gate below — set before constructing the
         # AgentSession since the gate closure reads it on every tool call.
-        self._permission_mode = PermissionMode.DEFAULT
+        self._permission_mode: PermissionMode = PermissionMode.DEFAULT
 
         self._agent_session = AgentSession(
             AgentSessionOptions(
@@ -376,9 +383,9 @@ class InteractiveSession:
         if not buf:
             return
         if buf.strip():
-            _console.print(Markdown(buf))
+            self._output.print_renderable(Markdown(buf))
         else:
-            _console.print(buf)
+            self._output.print(buf)
 
     def _handle_event(self, event: Any) -> None:
         """Display agent events with rich formatting."""
@@ -387,15 +394,15 @@ class InteractiveSession:
         # ── thinking ──────────────────────────────────────────────────
         if t == "thinking_start":
             self._thinking_open = True
-            _console.print(f"[{DIM_STYLE} italic]thinking[/{DIM_STYLE} italic]")
+            self._output.print(f"[{DIM_STYLE} italic]thinking[/{DIM_STYLE} italic]")
 
         elif t == "thinking_delta":
             delta = getattr(event, "delta", "")
-            _console.print(f"[{DIM_STYLE} italic]{escape(delta)}[/{DIM_STYLE} italic]", end="")
+            self._output.print(f"[{DIM_STYLE} italic]{escape(delta)}[/{DIM_STYLE} italic]", end="")
 
         elif t == "thinking_end":
             self._thinking_open = False
-            _console.print()
+            self._output.print()
 
         # ── text streaming: buffer and render as Markdown on text_end ─
         elif t == "text_start":
@@ -413,7 +420,7 @@ class InteractiveSession:
             tool_call = getattr(event, "tool_call", None)
             if tool_call:
                 args_str = _fmt_args(getattr(tool_call, "arguments", {}))
-                _console.print(f"\n[bold {PASTEL_BLUE}]> {escape(tool_call.name)}[/bold {PASTEL_BLUE}]({args_str})")
+                self._output.print(f"\n[bold {PASTEL_BLUE}]> {escape(tool_call.name)}[/bold {PASTEL_BLUE}]({args_str})")
 
         # ── tool execution (AgentSession) ─────────────────────────────
         elif t == "tool_call_start":
@@ -421,7 +428,7 @@ class InteractiveSession:
             args = getattr(event, "args", {}) or {}
             args_str = _fmt_args(args)
             self._status = f"running: {name}"
-            _console.print(f"[{PASTEL_YELLOW}]~[/{PASTEL_YELLOW}] [bold]{escape(name)}[/bold]({args_str})")
+            self._output.print(f"[{PASTEL_YELLOW}]~[/{PASTEL_YELLOW}] [bold]{escape(name)}[/bold]({args_str})")
 
         elif t == "tool_call_end":
             name = getattr(event, "name", "")
@@ -431,19 +438,19 @@ class InteractiveSession:
             self._status = "thinking..."
             icon_style = PASTEL_RED if is_error else PASTEL_GREEN
             icon = "!" if is_error else "+"
-            _console.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
+            self._output.print(f"[{icon_style}]{icon}[/{icon_style}] [bold]{escape(name)}[/bold]")
             diff = (details or {}).get("diff") if isinstance(details, dict) else None
             if diff:
-                _console.print(render_diff(diff))
+                self._output.print_renderable(render_diff(diff))
             else:
                 preview = _fmt_result_preview(result_text)
                 if preview:
-                    _console.print(preview)
+                    self._output.print(preview)
 
         # ── one-time local memory embedding model download ──────────────
         elif t == "memory_download":
             message = getattr(event, "message", "")
-            _console.print(f"[{DIM_STYLE}]{escape(message)}[/{DIM_STYLE}]")
+            self._output.print(f"[{DIM_STYLE}]{escape(message)}[/{DIM_STYLE}]")
 
         # ── done: flush any remaining text (stream ended without text_end)
         elif t == "done":
@@ -459,7 +466,7 @@ class InteractiveSession:
                 msg = err or "Unknown error"
             else:
                 msg = getattr(err, "error_message", None) or "Unknown error"
-            _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
+            self._output.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
         """Run a single conversation turn."""
@@ -472,7 +479,7 @@ class InteractiveSession:
         try:
             result = await self._agent_session.prompt(user_input)
         except Exception as exc:
-            _console.print(f"\n[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(str(exc))}")
+            self._output.print(f"\n[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(str(exc))}")
             return None
         finally:
             unsub()
@@ -669,7 +676,7 @@ class InteractiveSession:
             if inspect.isawaitable(result):
                 result = await result
             if isinstance(result, str) and result:
-                _console.print(result)
+                self._output.print(result)
             return True
         return False
 
@@ -681,7 +688,7 @@ class InteractiveSession:
             return False
 
         if cmd == "/help":
-            _console.print(
+            self._output.print(
                 "\n[bold]Commands[/bold]\n"
                 f"  [{PASTEL_BLUE}]/help[/{PASTEL_BLUE}]     Show this help\n"
                 f"  [{PASTEL_BLUE}]/exit[/{PASTEL_BLUE}]     Exit Pi\n"
@@ -694,7 +701,7 @@ class InteractiveSession:
             return True
 
         if cmd == "/model":
-            _console.print(
+            self._output.print(
                 f"Provider: [{PASTEL_BLUE}]{getattr(self._model, 'provider', '?')}[/{PASTEL_BLUE}]\n"
                 f"Model:    [{PASTEL_BLUE}]{getattr(self._model, 'id', '?')}[/{PASTEL_BLUE}]\n"
                 f"Context:  {getattr(self._model, 'context_window', '?')} tokens"
@@ -703,37 +710,37 @@ class InteractiveSession:
 
         if cmd == "/clear":
             self._agent_session._messages = []
-            _console.print("[dim]conversation cleared[/dim]")
+            self._output.print("[dim]conversation cleared[/dim]")
             return True
 
         if cmd == "/tools":
             for tool in self._agent_session._tools:
-                _console.print(f"  [{PASTEL_BLUE}]{tool.name}[/{PASTEL_BLUE}]: {tool.description}")
+                self._output.print(f"  [{PASTEL_BLUE}]{tool.name}[/{PASTEL_BLUE}]: {tool.description}")
             return True
 
         if cmd == "/session":
             if self._session_id:
-                _console.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
+                self._output.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
             else:
-                _console.print("[dim]no active session[/dim]")
+                self._output.print("[dim]no active session[/dim]")
             return True
 
         if cmd == "/extensions":
             extensions = self._agent_session.get_extensions()
             if not extensions.extensions and not extensions.errors:
-                _console.print("[dim]no extensions loaded[/dim]")
+                self._output.print("[dim]no extensions loaded[/dim]")
                 return True
             for ext in extensions.extensions:
                 tools = ", ".join(ext.tool_names) or "(no tools)"
-                _console.print(f"  [{PASTEL_GREEN}]{ext.path}[/{PASTEL_GREEN}]: {tools}")
+                self._output.print(f"  [{PASTEL_GREEN}]{ext.path}[/{PASTEL_GREEN}]: {tools}")
             for err in extensions.errors:
-                _console.print(f"  [{PASTEL_RED}]{err.path}[/{PASTEL_RED}]: {escape(err.error)}")
+                self._output.print(f"  [{PASTEL_RED}]{err.path}[/{PASTEL_RED}]: {escape(err.error)}")
             return True
 
         if await self._handle_extension_command(command):
             return True
 
-        _console.print(f"[yellow]Unknown command:[/yellow] {command}")
+        self._output.print(f"[yellow]Unknown command:[/yellow] {command}")
         return True
 
 
@@ -780,12 +787,32 @@ async def run_interactive_mode(args: Args) -> int:
         session_id=session_id,
     )
 
+    if _resolve_ui_mode(args, cwd, config_dir) == "fullscreen":
+        from pi_coding_agent.tui_app import PiApp
+
+        await PiApp(session).run_async()
+        return 0
+
     try:
         await session.repl_loop()
     except KeyboardInterrupt:
         _console.print("\n[dim]exiting[/dim]")
 
     return 0
+
+
+def _resolve_ui_mode(args: Args, cwd: str, config_dir: Path) -> str:
+    """--ui-mode/--alt wins; otherwise the persisted setting; "regular" if
+    neither is available (never let a settings-load failure block startup)."""
+    if args.ui_mode:
+        return args.ui_mode
+    try:
+        from pi_coding_agent.settings_manager import SettingsManager
+
+        settings_mgr = SettingsManager.create(cwd=cwd, agent_dir=config_dir)
+        return settings_mgr.get_ui_mode()
+    except Exception:
+        return "regular"
 
 
 def run_interactive_sync(args: Args) -> int:
