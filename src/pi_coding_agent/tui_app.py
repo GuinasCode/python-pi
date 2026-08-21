@@ -135,6 +135,15 @@ class TextualExtensionUIContext:
     def add_autocomplete_provider(self, provider: AutocompleteProvider) -> None:
         self._app._autocomplete_providers.append(provider)
 
+    def get_editor_text(self) -> str:
+        return self._app.query_one("#prompt-input", PromptTextArea).text
+
+    def set_editor_text(self, text: str) -> None:
+        self._app.query_one("#prompt-input", PromptTextArea).text = text
+
+    def paste_to_editor(self, text: str) -> None:
+        self._app.query_one("#prompt-input", PromptTextArea).insert(text)
+
 
 class PiApp(App[None]):
     """Alt-screen Textual front-end for an InteractiveSession."""

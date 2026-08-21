@@ -11,12 +11,15 @@ of T5's theme registration), ``get_tools_expanded``/``set_tools_expanded``
 consulted directly from InteractiveSession._handle_event, so unlike the
 chrome methods above this one actually works in the classic REPL too),
 and ``add_autocomplete_provider`` (extra suggestions merged into T4's
-popup). The wider surface the original also exposes —
-``pasteToEditor``/``setEditorText``/``getEditorText``/
-``setEditorComponent`` and the interactive TUI's own extension management
-screens — isn't ported yet; each needs its own concrete Textual mechanism
-decided first, the same way this slice needed SelectDialog/InputDialog
-(dialogs.py) and the widget slots before it could exist.
+popup). Also ported: ``get_editor_text``/``set_editor_text``/
+``paste_to_editor`` — direct reads/writes of the prompt editor's text
+(``paste_to_editor`` inserts at the cursor rather than replacing).
+``setEditorComponent`` (swapping the editor for an entirely custom
+widget) and the interactive TUI's own extension management screens
+aren't ported yet — both need real design work first (what a custom
+editor component's contract even is; what the management screens
+actually show/do), not just a mechanism decision like the items above
+needed.
 
 Two implementations: :class:`NoopExtensionUIContext` (the classic REPL,
 and any future non-interactive mode like print/RPC — nothing to show a
@@ -101,6 +104,19 @@ class ExtensionUIContext(Protocol):
         same popup."""
         ...
 
+    def get_editor_text(self) -> str:
+        """The prompt editor's current text."""
+        ...
+
+    def set_editor_text(self, text: str) -> None:
+        """Replace the prompt editor's text entirely."""
+        ...
+
+    def paste_to_editor(self, text: str) -> None:
+        """Insert `text` at the prompt editor's cursor position, leaving
+        the rest of its content untouched."""
+        ...
+
 
 class NoopExtensionUIContext:
     """No interactive surface to prompt on: select/input report "cancelled"
@@ -153,4 +169,17 @@ class NoopExtensionUIContext:
         self._tools_expanded = expanded
 
     def add_autocomplete_provider(self, provider: AutocompleteProvider) -> None:
+        pass
+
+    def get_editor_text(self) -> str:
+        # The REPL's input() is line-by-line and ephemeral — there's no
+        # persistent editor buffer to read back here, unlike tools_expanded
+        # above (which is just a flag, not tied to a widget that doesn't
+        # exist in this mode).
+        return ""
+
+    def set_editor_text(self, text: str) -> None:
+        pass
+
+    def paste_to_editor(self, text: str) -> None:
         pass

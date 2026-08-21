@@ -515,6 +515,40 @@ class TestPiApp:
             assert options == ["@bob", "@alice"]
 
     @pytest.mark.asyncio
+    async def test_editor_text_get_set_paste_via_ctx_ui(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "editorcmd.py").write_text(
+            "def _set(args_text, ctx):\n    ctx.ui.set_editor_text('hello')\n\n"
+            "def _paste(args_text, ctx):\n    ctx.ui.paste_to_editor(' world')\n\n"
+            "def _report(args_text, ctx):\n    return f'editor says: {ctx.ui.get_editor_text()}'\n\n"
+            "def extension(pi):\n"
+            '    pi.register_command("set", _set)\n'
+            '    pi.register_command("paste", _paste)\n'
+            '    pi.register_command("report", _report)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+
+            input_widget.text = "/set"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert input_widget.text == "hello"
+
+            input_widget.text = "/paste"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert input_widget.text == " world"
+
+            input_widget.text = "/report"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+            assert "editor says: " in _transcript_text(app)
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call

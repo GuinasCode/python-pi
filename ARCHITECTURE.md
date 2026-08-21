@@ -72,16 +72,22 @@ alongside the built-in slash-command matches); `get_tools_expanded`/`set_tools_e
 (whether a tool-call transcript entry's full result preview prints or just its summary line)
 — unlike every other Phase H method, this one is consulted directly by
 `InteractiveSession._handle_event`, so it's real, working state in the classic REPL too, not
-just the Textual app.
+just the Textual app. Also ported: `get_editor_text`/`set_editor_text`/`paste_to_editor` —
+direct reads/writes of the prompt editor's text (`paste_to_editor` inserts at the cursor
+rather than replacing); the REPL's Noop reports `""` for `get_editor_text` and drops the
+setters, since its `input()` prompt is line-by-line and ephemeral, not a persistent buffer.
 
-Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- `pasteToEditor`/`setEditorText`/`getEditorText`/`setEditorComponent` and the interactive
-  TUI's own extension management components
-  (`extension-input`/`extension-editor`/`extension-selector`) — the management screens in
-  particular are substantial UI in their own right, not a small wiring exercise like Phase H's
-  items above, and are being scoped separately rather than rushed in alongside them. The
-  classic REPL stays untouched for all of these — genuinely Textual-app UI chrome, unlike
-  Phase G's rendering hooks (and Phase H's `tools_expanded`, which apply to both front-ends).
+This closes out every `ExtensionUIContext` method that was just a mechanism decision away.
+Not ported, and blocked on real design work rather than just a missing mechanism:
+- `setEditorComponent` (swapping the prompt editor for an entirely custom widget) — what a
+  custom editor component's contract should even be isn't decided.
+- The interactive TUI's own extension management components
+  (`extension-input`/`extension-editor`/`extension-selector`) — substantial UI in their own
+  right (what they show, how extensions get browsed/toggled/edited), not a small wiring
+  exercise like everything above; scoped separately rather than rushed in alongside it.
+
+The classic REPL stays untouched for both of these — genuinely Textual-app UI chrome, unlike
+Phase G's rendering hooks (and Phase H's `tools_expanded`, which apply to both front-ends).
 
 ## Scope Reality Check
 

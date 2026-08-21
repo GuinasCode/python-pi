@@ -37,6 +37,12 @@ class TestNoopExtensionUIContext:
     def test_add_autocomplete_provider_does_not_raise(self) -> None:
         NoopExtensionUIContext().add_autocomplete_provider(lambda text: ["x"])
 
+    def test_editor_text_methods_do_not_raise_and_get_returns_empty(self) -> None:
+        ctx = NoopExtensionUIContext()
+        ctx.set_editor_text("hello")
+        ctx.paste_to_editor("world")
+        assert ctx.get_editor_text() == ""
+
     def test_widget_slot_setters_do_not_raise(self) -> None:
         ctx = NoopExtensionUIContext()
         ctx.set_header("hi")
