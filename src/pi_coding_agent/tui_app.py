@@ -8,34 +8,28 @@ instead of duplicating that logic for a second front-end. The classic
 REPL (``interactive_mode.repl_loop``) is untouched and stays the default;
 this is opt-in via ``--ui-mode fullscreen``/``--alt`` while it matures.
 
-Scope for T0 specifically: the app shell (transcript + input + footer),
-streaming turn rendering, and slash commands (including extension-
-registered ones). Deliberately NOT wired yet:
-
-- Permission-mode confirmation dialogs: needs Phase T2's modal/dialog
-  system. Shift+Tab still cycles the mode and updates the footer for
-  visual parity with the REPL, but ``permission_gate`` is left unset for
-  this app for now, so tools always run without a confirmation prompt —
-  same as running with no permission mode configured at all. This is a
-  real, intentional scope cut for T0, not a silent regression: plan/ask
-  mode semantics return once T2 lands a dialog InteractiveSession can
-  await on without blocking Textual's event loop (unlike the REPL's
-  blocking ``input()``, which cannot run here).
-- register_shortcut / rendering hooks (Phases T3-T6, G, H).
+Scope for T0/T1/T2 so far: the app shell (transcript + input + footer),
+streaming turn rendering, slash commands (including extension-registered
+ones), a real multi-line prompt editor, and permission-mode confirmation
+via a modal dialog (Phase T2 — replaces the REPL's blocking y/N input(),
+which would freeze Textual's event loop). Deliberately NOT wired yet:
+register_shortcut and rendering hooks (Phases T3-T6, G, H).
 """
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.console import RenderableType
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from pi_ai import StopReason
-from pi_coding_agent.interactive_mode import InteractiveSession
+from pi_coding_agent.dialogs import ConfirmDialog
+from pi_coding_agent.interactive_mode import InteractiveSession, _fmt_args
 from pi_coding_agent.permission_mode import permission_mode_label
 from pi_coding_agent.prompt_editor import PromptTextArea
 
@@ -120,8 +114,18 @@ class PiApp(App[None]):
     def on_mount(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)
         self._session._output = _TranscriptSink(transcript)
+        self._session._confirm_tool_fn = self._confirm_tool_via_modal
         self._update_footer()
         self.query_one("#prompt-input", PromptTextArea).focus()
+
+    async def _confirm_tool_via_modal(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """InteractiveSession._confirm_tool_fn: replaces the REPL's
+        blocking y/N input() with an async modal dialog — the blocking
+        version would freeze this app's event loop entirely."""
+        args_str = _fmt_args(args)
+        question = f"Allow [bold]{tool_name}[/bold]({args_str})?"
+        result = await self.push_screen_wait(ConfirmDialog(question))
+        return bool(result)
 
     def _update_footer(self) -> None:
         mode_label = permission_mode_label(self._session._permission_mode)
@@ -132,12 +136,20 @@ class PiApp(App[None]):
         self._session._cycle_permission_mode()
         self._update_footer()
 
-    async def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
+    def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
         text = event.value.strip()
         event.text_area.text = ""
         if not text:
             return
+        self._handle_submission(text)
 
+    @work(exclusive=True)
+    async def _handle_submission(self, text: str) -> None:
+        """Runs as a Textual worker (not a plain message-handler coroutine)
+        because it may end up calling push_screen_wait (via
+        _confirm_tool_via_modal, several calls down through run_turn's tool
+        loop) — push_screen_wait only works from inside a worker context.
+        """
         if text.startswith("/"):
             should_continue = await self._session._handle_command(text)
             self._update_footer()

@@ -14,10 +14,12 @@ from typing import Any
 import pytest
 from rich.console import Console
 from textual.containers import VerticalScroll
+from textual.pilot import Pilot
 from textual.widgets import Static
 
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
+from pi_coding_agent.dialogs import ConfirmDialog
 from pi_coding_agent.interactive_mode import InteractiveSession
 from pi_coding_agent.output_sink import ConsoleOutputSink
 from pi_coding_agent.permission_mode import PermissionMode
@@ -59,6 +61,22 @@ def _transcript_text(app: PiApp) -> str:
         if isinstance(child, Static):
             console.print(child.content)
     return console.export_text()
+
+
+async def _settle(app: PiApp, pilot: Pilot[None]) -> None:
+    """Wait for a submission to fully process.
+
+    _handle_submission runs as a @work(exclusive=True) worker (needed so
+    it can push_screen_wait a modal) — a plain pilot.pause() only pumps
+    the message queue once and isn't guaranteed to wait long enough for
+    that background task to actually finish, which showed up as an
+    intermittent race when this suite ran alongside other tests. Waiting
+    on the app's WorkerManager directly is the robust way to know the
+    submission has actually completed.
+    """
+    await pilot.pause()
+    await app.workers.wait_for_complete()
+    await pilot.pause()
 
 
 def _fake_scroll() -> tuple[VerticalScroll, list[Static]]:
@@ -127,7 +145,7 @@ class TestPiApp:
             input_widget = app.query_one("#prompt-input", PromptTextArea)
             input_widget.text = "what is the answer?"
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(app, pilot)
 
             assert input_widget.text == ""
             text = _transcript_text(app)
@@ -142,7 +160,7 @@ class TestPiApp:
             input_widget = app.query_one("#prompt-input", PromptTextArea)
             input_widget.text = ""
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(app, pilot)
             transcript = app.query_one("#transcript", VerticalScroll)
             assert len(transcript.children) == 0
 
@@ -154,7 +172,7 @@ class TestPiApp:
             input_widget = app.query_one("#prompt-input", PromptTextArea)
             input_widget.text = "/model"
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(app, pilot)
             assert session._agent_session._messages == []
 
     @pytest.mark.asyncio
@@ -165,7 +183,7 @@ class TestPiApp:
             input_widget = app.query_one("#prompt-input", PromptTextArea)
             input_widget.text = "/exit"
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(app, pilot)
             assert app._exit is True
 
     @pytest.mark.asyncio
@@ -200,8 +218,71 @@ class TestPiApp:
             input_widget = app.query_one("#prompt-input", PromptTextArea)
             input_widget.text = "/greet Bob"
             await pilot.press("enter")
-            await pilot.pause()
+            await _settle(app, pilot)
             assert "hello Bob" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        target = tmp_path / "written.txt"
+        session = _make_session(
+            tmp_path,
+            [
+                faux_assistant_message(
+                    [faux_tool_call("write", {"path": str(target), "content": "hi"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+        )
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "write the file"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # The dialog should be up now, blocking the tool call.
+            assert isinstance(app.screen, ConfirmDialog)
+            assert not target.exists()
+
+            await pilot.press("y")
+            await _settle(app, pilot)
+
+            assert target.read_text(encoding="utf-8") == "hi"
+
+    @pytest.mark.asyncio
+    async def test_default_mode_tool_call_blocked_on_no(self, tmp_path: Path) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        target = tmp_path / "written.txt"
+        session = _make_session(
+            tmp_path,
+            [
+                faux_assistant_message(
+                    [faux_tool_call("write", {"path": str(target), "content": "hi"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("done"),
+            ],
+        )
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "write the file"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            await pilot.press("n")
+            await _settle(app, pilot)
+
+            assert not target.exists()
+            tool_results = [m for m in session._agent_session._messages if getattr(m, "role", "") == "toolResult"]
+            assert len(tool_results) == 1
+            assert tool_results[0].is_error is True
 
 
 def test_console_output_sink_is_the_default_for_a_plain_session(tmp_path: Path) -> None:

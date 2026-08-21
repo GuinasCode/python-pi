@@ -13,7 +13,7 @@ import inspect
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -212,6 +212,11 @@ class InteractiveSession:
         # passes its own sink so the exact same event/command handling
         # renders into a transcript widget instead of straight to stdout.
         self._output: OutputSink = output or ConsoleOutputSink(_console)
+        # How _permission_gate's "ask" decision actually asks. Defaults to
+        # the REPL's blocking y/N input() prompt; the Textual app (Phase
+        # T2) swaps this for an async modal dialog instead, since a
+        # blocking input() call would freeze its event loop.
+        self._confirm_tool_fn: Callable[[str, dict[str, Any]], Awaitable[bool]] = self._confirm_tool
 
         resources = load_resources(cwd, self._config_dir)
 
@@ -272,12 +277,12 @@ class InteractiveSession:
         if decision is PermissionDecision.ALLOW:
             return True
         if decision is PermissionDecision.DENY:
-            _console.print(
+            self._output.print(
                 f"[{PASTEL_RED}]blocked[/{PASTEL_RED}] [bold]{escape(tool_name)}[/bold] — plan mode is "
                 "read-only [dim](shift+tab to change mode)[/dim]"
             )
             return False
-        return await self._confirm_tool(tool_name, args)
+        return await self._confirm_tool_fn(tool_name, args)
 
     async def _confirm_tool(self, tool_name: str, args: dict[str, Any]) -> bool:
         """Ask the user to approve a single mutating tool call (y/N)."""
