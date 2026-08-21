@@ -775,7 +775,7 @@ class InteractiveSession:
                 "\n[bold]Commands[/bold]\n"
                 f"  [{PASTEL_BLUE}]/help[/{PASTEL_BLUE}]     Show this help\n"
                 f"  [{PASTEL_BLUE}]/exit[/{PASTEL_BLUE}]     Exit Pi\n"
-                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Show current model\n"
+                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Show current model and list available providers/models\n"
                 f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
@@ -784,11 +784,27 @@ class InteractiveSession:
             return True
 
         if cmd == "/model":
-            self._output.print(
-                f"Provider: [{PASTEL_BLUE}]{getattr(self._model, 'provider', '?')}[/{PASTEL_BLUE}]\n"
-                f"Model:    [{PASTEL_BLUE}]{getattr(self._model, 'id', '?')}[/{PASTEL_BLUE}]\n"
-                f"Context:  {getattr(self._model, 'context_window', '?')} tokens"
-            )
+            current_provider = getattr(self._model, "provider", None)
+            current_id = getattr(self._model, "id", None)
+            lines = [
+                f"Current: [{PASTEL_BLUE}]{current_provider}[/{PASTEL_BLUE}]/"
+                f"[{PASTEL_BLUE}]{current_id}[/{PASTEL_BLUE}] "
+                f"[dim]({getattr(self._model, 'context_window', '?')} tokens)[/dim]",
+                "",
+            ]
+            providers = self._models.get_providers()
+            if not providers:
+                lines.append("[dim]no providers configured[/dim]")
+            for provider in providers:
+                lines.append(f"[bold]{escape(provider.name)}[/bold] [dim]({escape(provider.id)})[/dim]")
+                models = provider.get_models()
+                if not models:
+                    lines.append("  [dim](no models)[/dim]")
+                for model in models:
+                    is_current = provider.id == current_provider and model.id == current_id
+                    marker = f" [{PASTEL_GREEN}]*[/{PASTEL_GREEN}]" if is_current else ""
+                    lines.append(f"  [{PASTEL_BLUE}]{escape(model.id)}[/{PASTEL_BLUE}]{marker}")
+            self._output.print("\n".join(lines))
             return True
 
         if cmd == "/clear":

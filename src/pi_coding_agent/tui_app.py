@@ -188,7 +188,9 @@ class PiApp(App[None]):
     }
     #prompt-input {
         dock: bottom;
-        height: 3;
+        height: auto;
+        min-height: 3;
+        max-height: 12;
         border: solid $accent;
     }
     """

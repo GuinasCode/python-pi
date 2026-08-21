@@ -70,6 +70,36 @@ def test_interactive_slash_model(tmp_path: Path) -> None:
     assert asyncio.run(session._handle_command("/model")) is True
 
 
+def test_interactive_slash_model_lists_every_provider_and_its_models(tmp_path: Path) -> None:
+    """/model used to only print the currently active provider/model — it
+    should also list every other provider (and each of its models) that
+    MutableModels knows about, e.g. ones an extension registered via
+    pi.register_provider alongside the one actually in use."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    extra_provider: Provider[str] = Provider(
+        id="acme",
+        name="Acme AI",
+        models=[Model(id="acme-large", provider="acme"), Model(id="acme-small", provider="acme")],
+    )
+    session._models.set_provider(extra_provider)
+
+    printed: list[str] = []
+
+    def _record_print(markup: str = "", *, end: str = "\n") -> None:
+        printed.append(markup)
+
+    session._output.print = _record_print  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model")) is True
+    output = "\n".join(printed)
+    assert "Acme AI" in output
+    assert "acme-large" in output
+    assert "acme-small" in output
+
+
 def test_interactive_slash_clear(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     assert asyncio.run(session._handle_command("/clear")) is True

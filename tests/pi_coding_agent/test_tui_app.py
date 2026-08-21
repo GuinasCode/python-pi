@@ -138,6 +138,23 @@ class TestPiApp:
             assert isinstance(session._output, _TranscriptSink)
 
     @pytest.mark.asyncio
+    async def test_prompt_input_grows_with_multiline_content(self, tmp_path: Path) -> None:
+        """The input box used to have a fixed height of 3 rows with a
+        border eating 2 of them, leaving exactly 1 visible content row —
+        typing (or wrapping) past that pushed the cursor below the visible
+        box entirely instead of the box growing to show it."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            empty_height = input_widget.content_size.height
+            assert empty_height == 1
+
+            input_widget.text = "line one\nline two\nline three"
+            await pilot.pause()
+            assert input_widget.content_size.height >= 3
+
+    @pytest.mark.asyncio
     async def test_submitting_a_message_runs_a_turn_and_renders_the_reply(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path, [faux_assistant_message("the answer is 42")])
         app = PiApp(session)
