@@ -328,6 +328,21 @@ class TestPiApp:
             assert str(suggestions.get_option_at_index(0).prompt) == "/greet"
 
     @pytest.mark.asyncio
+    async def test_extension_theme_is_registered_and_selectable(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "theme.py").write_text(
+            'def extension(pi):\n    pi.register_theme("midnight", primary="#1e1e2e", dark=True)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test():
+            assert "midnight" in app.available_themes
+            app.theme = "midnight"
+            assert app.theme == "midnight"
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call

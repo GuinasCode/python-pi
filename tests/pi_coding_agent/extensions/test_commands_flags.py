@@ -32,6 +32,11 @@ def extension(pi):
     pi.register_shortcut("ctrl+g", _on_hotkey, description="Fire the hotkey")
 """
 
+_THEME_EXTENSION = """
+def extension(pi):
+    pi.register_theme("midnight", primary="#1e1e2e", dark=True)
+"""
+
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +68,16 @@ class TestExtensionAPIShortcuts:
         assert len(api.shortcuts) == 1
         assert api.shortcuts[0].key == "ctrl+g"
         assert api.shortcuts[0].description == "does a thing"
+
+
+class TestExtensionAPIThemes:
+    def test_register_theme_is_collected(self) -> None:
+        api = ExtensionAPI()
+        api.register_theme("midnight", primary="#1e1e2e", dark=True)
+        assert len(api.themes) == 1
+        assert api.themes[0].name == "midnight"
+        assert api.themes[0].primary == "#1e1e2e"
+        assert api.themes[0].dark is True
 
 
 class TestExtensionAPIFlags:
@@ -145,6 +160,32 @@ class TestExtensionRunnerShortcuts:
         runner = ExtensionRunner(tmp_path, tmp_path / "agent")
         runner.load()
         assert runner.get_shortcuts() == []
+
+
+class TestLoaderCapturesThemes:
+    def test_theme_extension_is_captured(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "theme.py", _THEME_EXTENSION)
+        api = ExtensionAPI()
+        error = load_extension_from_path(path, api)
+        assert error is None
+        assert len(api.themes) == 1
+        assert api.themes[0].name == "midnight"
+
+
+class TestExtensionRunnerThemes:
+    def test_get_themes_aggregates_across_extensions(self, tmp_path: Path) -> None:
+        _write(tmp_path / ".pi" / "extensions" / "theme.py", _THEME_EXTENSION)
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        themes = runner.get_themes()
+        assert len(themes) == 1
+        assert themes[0].name == "midnight"
+        assert themes[0].primary == "#1e1e2e"
+
+    def test_no_themes_when_nothing_loaded(self, tmp_path: Path) -> None:
+        runner = ExtensionRunner(tmp_path, tmp_path / "agent")
+        runner.load()
+        assert runner.get_themes() == []
 
 
 class TestExtensionRunnerCommandsAndFlags:

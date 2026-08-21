@@ -8,13 +8,15 @@ instead of duplicating that logic for a second front-end. The classic
 REPL (``interactive_mode.repl_loop``) is untouched and stays the default;
 this is opt-in via ``--ui-mode fullscreen``/``--alt`` while it matures.
 
-Scope for T0-T4 so far: the app shell (transcript + input + footer),
+Scope for T0-T5 so far: the app shell (transcript + input + footer),
 streaming turn rendering, slash commands (including extension-registered
 ones), a real multi-line prompt editor, permission-mode confirmation via a
 modal dialog (Phase T2), a keybinding dispatcher for extension-registered
-shortcuts (Phase T3), and a slash-command autocomplete popup (Phase T4).
-Deliberately NOT wired yet: theme/footer-header customization and
-rendering hooks (Phases T5-T6, G, H).
+shortcuts (Phase T3), a slash-command autocomplete popup (Phase T4), and
+extension-registered color themes (Phase T5 — registered onto Textual's
+own theme system; switchable today via Textual's built-in command palette,
+Ctrl+P). Deliberately NOT wired yet: footer/header customization and
+rendering hooks (Phase T6, G, H).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
+from textual.theme import Theme
 from textual.widgets import OptionList, Static
 
 from pi_ai import StopReason
@@ -125,6 +128,23 @@ class PiApp(App[None]):
         transcript = self.query_one("#transcript", VerticalScroll)
         self._session._output = _TranscriptSink(transcript)
         self._session._confirm_tool_fn = self._confirm_tool_via_modal
+        for theme in self._session._agent_session.get_extension_themes():
+            self.register_theme(
+                Theme(
+                    name=theme.name,
+                    primary=theme.primary,
+                    secondary=theme.secondary,
+                    warning=theme.warning,
+                    error=theme.error,
+                    success=theme.success,
+                    accent=theme.accent,
+                    foreground=theme.foreground,
+                    background=theme.background,
+                    surface=theme.surface,
+                    panel=theme.panel,
+                    dark=theme.dark,
+                )
+            )
         self._update_footer()
         self.query_one("#prompt-input", PromptTextArea).focus()
 

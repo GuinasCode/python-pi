@@ -34,6 +34,7 @@ from pi_coding_agent.extensions import (
     LoadExtensionsResult,
     RegisteredCommand,
     RegisteredShortcut,
+    RegisteredTheme,
 )
 from pi_coding_agent.extensions.events import (
     AgentEndEvent,
@@ -392,6 +393,12 @@ class AgentSession:
         if self._extension_runner is None:
             return []
         return self._extension_runner.get_shortcuts()
+
+    def get_extension_themes(self) -> list[RegisteredTheme]:
+        """Every color theme registered by a loaded extension."""
+        if self._extension_runner is None:
+            return []
+        return self._extension_runner.get_themes()
 
     def get_extension_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by a loaded extension."""

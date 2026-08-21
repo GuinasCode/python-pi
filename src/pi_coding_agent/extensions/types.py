@@ -58,6 +58,31 @@ class RegisteredShortcut:
 
 
 @dataclass
+class RegisteredTheme:
+    """A color theme an extension registered via ``pi.register_theme``.
+
+    Field names/semantics mirror ``textual.theme.Theme`` directly (the T5
+    dispatcher in tui_app.py constructs one of those from this dataclass
+    via ``dataclasses.asdict`` minus ``name``) rather than inventing a
+    parallel color-scheme shape — only ``primary`` is required, matching
+    Theme's own construction contract.
+    """
+
+    name: str
+    primary: str
+    secondary: str | None = None
+    warning: str | None = None
+    error: str | None = None
+    success: str | None = None
+    accent: str | None = None
+    foreground: str | None = None
+    background: str | None = None
+    surface: str | None = None
+    panel: str | None = None
+    dark: bool = True
+
+
+@dataclass
 class ExtensionFlag:
     """A CLI flag declaration an extension registered via ``pi.register_flag``."""
 
@@ -90,6 +115,7 @@ class LoadedExtension:
     commands: list[RegisteredCommand] = field(default_factory=list)
     flags: dict[str, ExtensionFlag] = field(default_factory=dict)
     shortcuts: list[RegisteredShortcut] = field(default_factory=list)
+    themes: list[RegisteredTheme] = field(default_factory=list)
 
     @property
     def tool_names(self) -> list[str]:
@@ -122,6 +148,7 @@ class ExtensionAPI:
         self._handlers: dict[str, list[ExtensionHandler]] = defaultdict(list)
         self._commands: list[RegisteredCommand] = []
         self._shortcuts: list[RegisteredShortcut] = []
+        self._themes: list[RegisteredTheme] = []
         self._flags: dict[str, ExtensionFlag] = {}
         # Shared with the owning ExtensionRunner (same dict object, not a
         # copy) so pi.get_flag() sees values the runner sets *after* this
@@ -184,6 +211,47 @@ class ExtensionAPI:
     @property
     def shortcuts(self) -> list[RegisteredShortcut]:
         return list(self._shortcuts)
+
+    def register_theme(
+        self,
+        name: str,
+        primary: str,
+        *,
+        secondary: str | None = None,
+        warning: str | None = None,
+        error: str | None = None,
+        success: str | None = None,
+        accent: str | None = None,
+        foreground: str | None = None,
+        background: str | None = None,
+        surface: str | None = None,
+        panel: str | None = None,
+        dark: bool = True,
+    ) -> None:
+        """Register a color theme, selectable as ``app.theme = name`` in the
+        Textual app (``--ui-mode fullscreen``) — a no-op in the classic
+        REPL, which has no theming system to register into. Colors are hex
+        strings (e.g. ``"#1e1e2e"``), matching ``textual.theme.Theme``."""
+        self._themes.append(
+            RegisteredTheme(
+                name=name,
+                primary=primary,
+                secondary=secondary,
+                warning=warning,
+                error=error,
+                success=success,
+                accent=accent,
+                foreground=foreground,
+                background=background,
+                surface=surface,
+                panel=panel,
+                dark=dark,
+            )
+        )
+
+    @property
+    def themes(self) -> list[RegisteredTheme]:
+        return list(self._themes)
 
     def register_flag(
         self,

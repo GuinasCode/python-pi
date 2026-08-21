@@ -20,6 +20,7 @@ from pi_coding_agent.extensions.types import (
     LoadExtensionsResult,
     RegisteredCommand,
     RegisteredShortcut,
+    RegisteredTheme,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "LoadedExtension",
     "RegisteredCommand",
     "RegisteredShortcut",
+    "RegisteredTheme",
     "discover_extension_paths",
     "load_extension_from_path",
     "load_extensions",

@@ -33,6 +33,7 @@ from pi_coding_agent.extensions.types import (
     LoadExtensionsResult,
     RegisteredCommand,
     RegisteredShortcut,
+    RegisteredTheme,
 )
 
 __all__ = ["ExtensionRunner"]
@@ -92,6 +93,11 @@ class ExtensionRunner:
         same key does not replace an earlier one; the T3 dispatcher fires
         the first match, mirroring get_commands' load-order semantics."""
         return [shortcut for ext in self._result.extensions for shortcut in ext.shortcuts]
+
+    def get_themes(self) -> list[RegisteredTheme]:
+        """Every color theme registered by every successfully loaded
+        extension, in load order."""
+        return [theme for ext in self._result.extensions for theme in ext.themes]
 
     def get_flags(self) -> dict[str, ExtensionFlag]:
         """Every CLI flag declared by every successfully loaded extension,
