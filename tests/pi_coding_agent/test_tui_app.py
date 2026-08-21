@@ -395,6 +395,42 @@ class TestPiApp:
             assert notified == ["hi there"]
 
     @pytest.mark.asyncio
+    async def test_extension_widget_slots_show_and_hide(self, tmp_path: Path) -> None:
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "chrome.py").write_text(
+            "def _handler(args_text, ctx):\n"
+            '    ctx.ui.set_header("custom header")\n'
+            '    ctx.ui.set_footer("custom footer")\n'
+            '    ctx.ui.set_title("custom title")\n'
+            '    ctx.ui.set_widget("custom widget")\n\n'
+            'def extension(pi):\n    pi.register_command("chrome", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            header = app.query_one("#ext-header", Static)
+            footer = app.query_one("#ext-footer", Static)
+            widget = app.query_one("#ext-widget", Static)
+            assert header.display is False
+            assert footer.display is False
+            assert widget.display is False
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/chrome"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert header.display is True
+            assert str(header.content) == "custom header"
+            assert footer.display is True
+            assert str(footer.content) == "custom footer"
+            assert widget.display is True
+            assert str(widget.content) == "custom widget"
+            assert app.title == "custom title"
+
+    @pytest.mark.asyncio
     async def test_default_mode_tool_call_shows_confirm_dialog_and_allows_on_yes(self, tmp_path: Path) -> None:
         from pi_ai import StopReason
         from pi_ai.providers.faux import faux_tool_call

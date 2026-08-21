@@ -22,3 +22,14 @@ class TestNoopExtensionUIContext:
 
     def test_notify_does_not_raise(self) -> None:
         NoopExtensionUIContext().notify("hello")
+
+    def test_widget_slot_setters_do_not_raise(self) -> None:
+        ctx = NoopExtensionUIContext()
+        ctx.set_header("hi")
+        ctx.set_footer("hi")
+        ctx.set_title("hi")
+        ctx.set_widget("hi")
+        ctx.set_header(None)
+        ctx.set_footer(None)
+        ctx.set_title(None)
+        ctx.set_widget(None)

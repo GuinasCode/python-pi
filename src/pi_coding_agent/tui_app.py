@@ -106,6 +106,18 @@ class TextualExtensionUIContext:
     def notify(self, message: str, *, severity: str = "information") -> None:
         self._app.notify(message, severity=severity)  # type: ignore[arg-type]
 
+    def set_header(self, content: RenderableType | str | None) -> None:
+        self._app._set_slot("#ext-header", content)
+
+    def set_footer(self, content: RenderableType | str | None) -> None:
+        self._app._set_slot("#ext-footer", content)
+
+    def set_title(self, title: str | None) -> None:
+        self._app.title = title or ""
+
+    def set_widget(self, content: RenderableType | str | None) -> None:
+        self._app._set_slot("#ext-widget", content)
+
 
 class PiApp(App[None]):
     """Alt-screen Textual front-end for an InteractiveSession."""
@@ -115,11 +127,31 @@ class PiApp(App[None]):
         height: 1fr;
         padding: 0 1;
     }
+    #ext-header {
+        dock: top;
+        height: auto;
+        padding: 0 1;
+        background: $panel;
+        display: none;
+    }
     #status-footer {
         dock: bottom;
         height: 2;
         padding: 0 1;
         background: $panel;
+    }
+    #ext-footer {
+        dock: bottom;
+        height: auto;
+        padding: 0 1;
+        background: $panel;
+        display: none;
+    }
+    #ext-widget {
+        dock: bottom;
+        height: auto;
+        padding: 0 1;
+        display: none;
     }
     #suggestions {
         dock: bottom;
@@ -149,10 +181,23 @@ class PiApp(App[None]):
         self._session = session
 
     def compose(self) -> ComposeResult:
+        yield Static(id="ext-header")
         yield VerticalScroll(id="transcript")
         yield Static(id="status-footer")
+        yield Static(id="ext-footer")
+        yield Static(id="ext-widget")
         yield OptionList(id="suggestions")
         yield PromptTextArea(id="prompt-input")
+
+    def _set_slot(self, selector: str, content: RenderableType | str | None) -> None:
+        """Phase H: shared show/hide logic for the ext-header/ext-footer/
+        ext-widget slots — ``content=None`` hides the slot again."""
+        widget = self.query_one(selector, Static)
+        if content is None:
+            widget.display = False
+            return
+        widget.update(content)
+        widget.display = True
 
     def on_mount(self) -> None:
         transcript = self.query_one("#transcript", VerticalScroll)

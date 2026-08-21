@@ -62,19 +62,23 @@ Phase H (`ExtensionUIContext`) is in progress. Ported so far: `select()`/`confir
 a surface the Textual app already covers), swapped for `TextualExtensionUIContext`
 (`tui_app.py`) in the Textual app — `select`/`confirm`/`input` push `SelectDialog`/
 `ConfirmDialog`/`InputDialog` (`dialogs.py`) and await the result; `notify` uses Textual's own
-toast mechanism directly.
+toast mechanism directly. Also ported: `set_header`/`set_footer`/`set_title`/`set_widget` —
+three reserved, hidden-until-set `Static` slots in `PiApp.compose()` (`#ext-header` docked
+top; `#ext-footer` alongside — not replacing — the built-in status footer; `#ext-widget` just
+above the prompt editor) plus `app.title`, all no-ops in the classic REPL the same way the
+prompts above are.
 
 Not ported, and blocked on a real prerequisite rather than just unscheduled:
-- The rest of `ExtensionUIContext`: `setWidget`/`setFooter`/`setHeader`/`setTitle` (custom UI
-  regions), `pasteToEditor`/`setEditorText`/`getEditorText`/`setEditorComponent`,
-  `addAutocompleteProvider` (the extension-facing API — T4's popup already covers the
-  mechanism), theme getters/setters (trivial once needed — `app.theme = name` on top of T5's
-  registration), `getToolsExpanded`/`setToolsExpanded`, and the interactive TUI's own
-  extension management components (`extension-input`/`extension-editor`/`extension-selector`)
-  — these need a widget-slot mechanism this port doesn't have yet, the same way dialogs
-  needed T2's `ModalScreen` pattern before `select`/`confirm`/`input` could exist. The classic
-  REPL stays untouched for all of these — genuinely Textual-app UI chrome, unlike Phase G's
-  rendering hooks (which apply to both front-ends).
+- The rest of `ExtensionUIContext`: `pasteToEditor`/`setEditorText`/`getEditorText`/
+  `setEditorComponent`, `addAutocompleteProvider` (the extension-facing API — T4's popup
+  already covers the mechanism), theme getters/setters (trivial once needed —
+  `app.theme = name` on top of T5's registration), `getToolsExpanded`/`setToolsExpanded`, and
+  the interactive TUI's own extension management components
+  (`extension-input`/`extension-editor`/`extension-selector`) — the management screens in
+  particular are substantial UI in their own right, not a small wiring exercise like the
+  items above were, and are being scoped separately rather than rushed in alongside them. The
+  classic REPL stays untouched for all of these — genuinely Textual-app UI chrome, unlike
+  Phase G's rendering hooks (which apply to both front-ends).
 
 ## Scope Reality Check
 
