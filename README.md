@@ -13,7 +13,7 @@ A Python port of the [Pi coding agent](https://pi.dev) — a minimal agent harne
 | `pi_client` | Client for connecting to Pi servers |
 | `pi_server` | Server with session management and protocol handling |
 | `pi_storage_sqlite` | SQLite session storage backend |
-| `pi_coding_agent` | CLI coding agent with built-in tools |
+| `pi_coding_agent` | CLI coding agent with built-in tools, and the extension system (`pi_coding_agent.extensions`) |
 | `pi_memory` | Persistent memory across sessions: SQLite + FTS5 + sqlite-vec hybrid search |
 | `pi_evals` | Behavioral, model-backed evals for Pi workflows (`pytest-evals`-based) |
 
@@ -152,6 +152,59 @@ See `pi_evals.judges` for LLM-as-judge scoring with observation-only thresholds,
 Run artifacts (`.eval/runs.jsonl` + per-run session snapshots) are written via
 `pi_evals.artifacts.EvalArtifactWriter` — gitignored, same as pytest-evals' own
 `test-out/` result dumps.
+
+## Extensions
+
+`pi` loads custom tools (and more) from plain Python files under `.pi/extensions/`
+(project-local) or `~/.pi/extensions/` (global) — a port of
+`packages/coding-agent/src/core/extensions/`. See
+[`docs/extensions.md`](src/pi_coding_agent/docs/extensions.md) for the full authoring
+guide and [`examples/extensions/hello.py`](src/pi_coding_agent/examples/extensions/hello.py)
+for a runnable example; `pi` points the model at both of these itself when asked to write
+an extension.
+
+```python
+# .pi/extensions/hello.py
+from pi_agent_core.types import AgentTool, AgentToolResult
+from pi_ai import TextContent
+
+
+async def _hello(_tool_call_id, args, _context, _on_update):
+    return AgentToolResult(content=[TextContent(text=f"Hello, {args.get('name', '')}!")])
+
+
+def extension(pi):
+    pi.register_tool(
+        AgentTool(
+            name="hello",
+            description="Greets someone by name.",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+            execute=_hello,
+        )
+    )
+```
+
+The `pi` object also supports:
+
+- `pi.on(event_name, handler)` — subscribe to `tool_call`/`tool_result` (mutate arguments
+  in place, block execution, override results) and `agent_start`/`agent_end`/`turn_start`/
+  `turn_end`/`session_start` lifecycle notifications.
+- `pi.register_command(name, handler, description=)` — a `/name ...` slash command in
+  interactive mode.
+- `pi.register_flag(name, type=, default=, description=)` / `pi.get_flag(name)` — declare
+  and read a value programmatically (not yet wired to real CLI argv parsing).
+- `pi.register_provider(provider)` / `pi.unregister_provider(name)` — add or remove a
+  model provider, effective immediately.
+
+A broken extension (bad import, a raised exception, a handler that errors) is recorded as
+a load/runtime error and skipped — never crashes the session. `/extensions` in interactive
+mode lists what loaded and what didn't. Extension entry points must be synchronous
+(`def extension(pi)`, not `async def`) — do async setup lazily inside a tool's `execute()`.
+
+Not implemented: keyboard shortcuts (`register_shortcut`) and rendering/UI hooks (custom
+message/markdown/entry renderers, dialogs, widgets, autocomplete, keybindings) — these need
+a keybinding dispatcher and a widget/dialog framework this port's `pi_tui` doesn't have yet,
+tracked as a separate, larger prerequisite in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Architecture
 

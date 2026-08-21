@@ -8,9 +8,36 @@ now exists (`src/pi_evals/`, `eval` extra in `pyproject.toml`) as a port onto
 of `vitest-evals` (none exists) — see the README's Evals section for usage. Ported:
 `pi_harness.py` (the `AgentSession` adapter), `judges.py` (LLM-as-judge scoring),
 `harness_table.py` (comparative baseline/candidate sets), `artifacts.py` (`.eval/`
-run/session snapshots), the `pi-evals` CLI, and `smoke.eval.ts` → `test_smoke.py`. Not
-ported: `extensions.eval.ts` — it needs an extensions system (`.pi/extensions`) this
-Python port doesn't have yet; that's a separate, larger prerequisite, not an evals gap.
+run/session snapshots), the `pi-evals` CLI, `smoke.eval.ts` → `test_smoke.py`, and
+`extensions.eval.ts` → `test_extensions.py` (see below — the extension system this
+needed has since been ported).
+
+**Extension system** (`src/pi_coding_agent/extensions/`, port of
+`packages/coding-agent/src/core/extensions/`): ported in phases, tracked here since the
+original is a ~4,000-line, 40+-event plugin SDK — too large to port in one pass and not
+all of it has a Python-side prerequisite yet.
+
+Ported: discovery/dynamic loading of `.pi/extensions/*.py` (no jiti/virtual-module
+machinery needed — Python extensions just `import pi_ai`/`pi_coding_agent` directly);
+`ExtensionRunner` wired into `AgentSession` (tool registration, `reload()`, error
+reporting); the "Pi documentation" system-prompt section pointing at a bundled authoring
+guide + example; the event bus (`tool_call`/`tool_result`/agent+turn+session lifecycle —
+the highest-leverage subset of the original's 30+ event types, not all of them);
+`register_command`/`register_flag`+`get_flag`; `register_provider`/`unregister_provider`.
+See the README's Extensions section for usage.
+
+Not ported, and blocked on a real prerequisite rather than just unscheduled:
+- `register_shortcut` — needs a real keybinding dispatcher. `pi_tui`'s `raw_input.py` only
+  handles one hardcoded key (Shift+Tab for the permission-mode footer), not a general
+  registration/dispatch system.
+- Rendering/UI hooks (custom message/markdown/entry renderers, dialogs, widgets,
+  autocomplete providers, custom editors) and the interactive TUI's own extension
+  management components (`extension-input`/`extension-editor`/`extension-selector`) — need
+  a widget/dialog/layout framework. Today's `pi_tui` is low-level terminal utilities only
+  (fuzzy search, kill ring, word navigation); `interactive_mode.py` is a plain
+  `rich.console.Console` REPL, not an alt-screen app with composable UI regions. Building
+  that framework is a separate, larger initiative in its own right — start there before
+  attempting these, not by half-wiring registration APIs with nothing real behind them.
 
 ## Scope Reality Check
 
