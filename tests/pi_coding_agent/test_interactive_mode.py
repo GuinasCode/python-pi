@@ -352,12 +352,22 @@ class TestPromptInputFullRedraw:
     """_prompt_input's live footer used to corrupt the screen once typed
     input wrapped past one terminal row (fixed row-offset assumptions
     baked in when the footer was first drawn stopped matching reality as
-    soon as the input grew past that). It now fully repaints, anchored at
-    a saved cursor position, on every keystroke instead — these drive that
-    through a fake read_line_with_cycle and check the escape sequences it
-    writes are well-formed (in particular, every absolute-column request
-    stays within [1, terminal width], the bug's telltale symptom when it
-    regresses)."""
+    soon as the input grew past that). It now fully repaints on every
+    keystroke instead, using only relative cursor moves (never DECSC/
+    DECRC save/restore, which doesn't reliably survive a scroll event
+    happening between the save and a later restore — that desync is what
+    caused a second, different bug: the footer visibly duplicating itself
+    down the screen after a turn, once a long assistant reply had scrolled
+    the screen before the next prompt cycle's DECSC save even happened).
+
+    These drive _render through a fake read_line_with_cycle and check the
+    escape sequences it writes are well-formed (every absolute-column
+    request stays within [1, terminal width], no negative offsets — the
+    first bug's telltale symptom), and (TestFooterDoesNotDuplicate below)
+    interpret those sequences against a minimal virtual terminal to check
+    the actual on-screen *result* — a plain string capture can't tell a
+    correctly-clearing redraw apart from stale content silently piling up
+    beneath it, which is exactly what the duplication bug looked like."""
 
     @staticmethod
     def _run_with_fake_input(
@@ -475,3 +485,145 @@ class TestPromptInputFullRedraw:
         columns = [int(n) for n in re.findall(r"\x1b\[(\d+)G", output)]
         assert columns, "expected at least one absolute-column cursor move"
         assert all(1 <= c <= width for c in columns), columns
+
+
+class _VirtualTerminal:
+    """Interprets exactly the escape sequences _prompt_input's _render/
+    land_below_footer emit (\\r, \\n, CSI A/B/G/J, SGR is ignored — it
+    doesn't move the cursor) against a plain list-of-lines screen buffer,
+    tracking cursor row/col — enough to check the actual *rendered*
+    result of a sequence of writes, not just the raw bytes. A StringIO
+    capture can't distinguish "redrew correctly in place" from "cleared
+    the wrong region and left stale content sitting there", which is
+    exactly what the footer-duplication bug looked like; this can.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[str] = [""]
+        self.row = 0
+        self.col = 0
+
+    def feed(self, data: str) -> None:
+        i = 0
+        while i < len(data):
+            ch = data[i]
+            if ch == "\x1b" and data[i + 1 : i + 2] == "[":
+                j = i + 2
+                while j < len(data) and not data[j].isalpha() and data[j] != "~":
+                    j += 1
+                params, final = data[i + 2 : j], data[j] if j < len(data) else ""
+                self._apply_csi(params, final)
+                i = j + 1
+                continue
+            if ch == "\r":
+                self.col = 0
+                i += 1
+                continue
+            if ch == "\n":
+                self.row += 1
+                self._ensure_row(self.row)
+                i += 1
+                continue
+            self._write_char(ch)
+            i += 1
+
+    def _ensure_row(self, row: int) -> None:
+        while row >= len(self.lines):
+            self.lines.append("")
+
+    def _write_char(self, ch: str) -> None:
+        self._ensure_row(self.row)
+        line = self.lines[self.row]
+        if self.col >= len(line):
+            line = line + (" " * (self.col - len(line))) + ch
+        else:
+            line = line[: self.col] + ch + line[self.col + 1 :]
+        self.lines[self.row] = line
+        self.col += 1
+
+    def _apply_csi(self, params: str, final: str) -> None:
+        n = int(params) if params.isdigit() else 1
+        if final == "A":
+            self.row = max(0, self.row - n)
+        elif final == "B":
+            self.row += n
+            self._ensure_row(self.row)
+        elif final == "G":
+            self.col = n - 1
+        elif final == "J" and params in ("0", ""):
+            self._ensure_row(self.row)
+            self.lines[self.row] = self.lines[self.row][: self.col]
+            self.lines = self.lines[: self.row + 1]
+        # SGR ("m") and anything else: no cursor-position effect, ignore.
+
+    def rendered_text(self) -> str:
+        return "\n".join(self.lines)
+
+
+class TestFooterDoesNotDuplicate:
+    """Regression test for the DECSC/DECRC desync bug: after a long
+    assistant reply scrolls the screen, the *next* input cycle's footer
+    used to visibly duplicate itself down the screen — each keystroke's
+    save-then-restore landing at a different, drifting offset from where
+    the input row actually was. Runs _prompt_input's actual output
+    through _VirtualTerminal and checks the state/mode line text appears
+    exactly once on the resulting screen, across a sequence of renders
+    interleaved with unrelated output (standing in for the scrolling a
+    real assistant reply would cause)."""
+
+    def test_repeated_renders_leave_exactly_one_footer(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
+
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+            on_render("", 0, None)
+            for text in ["h", "he", "hel", "hell", "hello", "hello world, this wraps a bit"]:
+                on_render(text, len(text), None)
+            return "hello world, this wraps a bit"
+
+        monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+
+        asyncio.run(session._prompt_input())
+
+        term = _VirtualTerminal()
+        term.feed(fake_stdout.getvalue())
+        rendered = term.rendered_text()
+        assert rendered.count("shift+tab to cycle") == 1, rendered
+
+    def test_footer_does_not_duplicate_across_multiple_turns(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Three simulated REPL turns, each with a chunk of "assistant
+        reply" text printed directly to stdout between _prompt_input
+        calls (standing in for what repl_loop actually does) — the exact
+        shape that triggered the duplication bug in practice."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
+
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+            on_render("", 0, None)
+            on_render("hi", 2, None)
+            return "hi"
+
+        monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+
+        for _ in range(3):
+            asyncio.run(session._prompt_input())
+            # A long-ish "assistant reply" — several wrapped lines, like
+            # what actually preceded the reported duplication.
+            fake_stdout.write(("assistant reply line. " * 10 + "\r\n") * 4)
+
+        term = _VirtualTerminal()
+        term.feed(fake_stdout.getvalue())
+        rendered = term.rendered_text()
+        assert rendered.count("shift+tab to cycle") == 3, rendered

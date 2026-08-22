@@ -581,24 +581,35 @@ class InteractiveSession:
         """Draw the bordered input area with a live footer, return stripped text or None on exit.
 
         The whole block (prompt + typed text + bottom rule + state/mode
-        [/repo] lines) is fully redrawn, anchored at a cursor position
-        saved once before typing starts, on every keystroke — not just
-        when Shift+Tab is pressed. That's a deliberate trade: input can
-        wrap across multiple terminal rows once it's long enough (the
-        terminal does this on its own), and the footer sits immediately
-        below it — incrementally patching the screen in place while
-        tracking exactly how many rows the wrapped input currently
-        occupies (and where within them the cursor now sits, since
-        Left/Right/Home/End can put it anywhere in the buffer, not just
-        the end) is fragile row-arithmetic that used to corrupt the
-        display (new characters landing on top of already-drawn footer
-        text once input grew past one row, since the footer's position
-        was computed once up front assuming it never would). A full
-        repaint from a fixed anchor, positioning everything as an
-        explicit (row, column) offset *from that anchor* rather than
-        relative to wherever the cursor happens to currently be, sidesteps
-        needing that arithmetic at all — and a human's typing rate makes
-        the repaint itself unnoticeable.
+        [/repo] lines) is fully redrawn on every keystroke, not just when
+        Shift+Tab is pressed — input can wrap across multiple terminal
+        rows once it's long enough (the terminal does this on its own),
+        and the footer sits immediately below it, so incrementally
+        patching the screen in place while tracking exactly how many rows
+        the wrapped input currently occupies (and where within them the
+        cursor now sits, since Left/Right/Home/End can put it anywhere in
+        the buffer, not just the end) is fragile row-arithmetic. A full
+        repaint sidesteps needing that arithmetic — a human's typing rate
+        makes the repaint itself unnoticeable.
+
+        Positioning is done with *relative* cursor moves only (CSI
+        A/B — up/down N rows — never DECSC/DECRC save/restore): every
+        move is computed from ``last_cursor_row``, the 0-indexed row (from
+        the input's own first row) the cursor was left on by the
+        previous render, which this method tracks itself rather than
+        asking the terminal to remember a position for it. DECSC/DECRC
+        was tried first and had to be abandoned — it saves a position
+        relative to the *current screen*, and doesn't reliably keep
+        tracking that position across a scroll event (e.g. one caused by
+        a long assistant reply, or even by the footer's own lines pushing
+        the viewport) that happens between the save and a later restore;
+        when that desync happens, DECRC lands one or more rows off from
+        where the input row actually is, and each keystroke's restore
+        being off by a different, drifting amount is exactly what caused
+        the footer to visibly duplicate itself down the screen. Plain
+        relative moves have no "remembered absolute position" to desync
+        in the first place — they always act on wherever the cursor
+        genuinely is right now.
         """
         w = _console.width
 
@@ -621,30 +632,35 @@ class InteractiveSession:
         prompt = "\033[1m>\033[0m "
         prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
 
-        def _row_col(pos: int) -> tuple[int, int]:
-            """0-indexed row and 1-indexed column, both relative to the
-            anchor, of the position right after `pos` characters (prompt
-            included) have been laid out at terminal width `w`."""
-            return pos // w, (pos % w) + 1
+        def _row_col_after(n: int) -> tuple[int, int]:
+            """0-indexed row and 1-indexed column of the position right
+            after the n-th character has been laid out at terminal width
+            `w` (n counts from the input row's own start, prompt
+            included) — "deferred wrap" convention: filling a row exactly
+            stays put on that row's last column rather than jumping to a
+            new, still-empty one, matching how a plain character write
+            actually leaves the terminal's cursor (real wrapping only
+            happens once a *further* character forces it)."""
+            row = (n - 1) // w
+            col = min(((n - 1) % w) + 2, w)
+            return row, col
 
-        # Anchor: the still-blank row input is about to start on. Every
-        # write below is positioned as an explicit offset from here,
-        # restoring to it first — never relative to wherever the cursor
-        # currently is, which is what let the old scheme's assumptions
-        # drift out of sync with reality once input wrapped.
-        sys.stdout.write("\x1b7")  # DECSC
-        sys.stdout.flush()
-
-        # Remembers the last render so land_below_footer (called after
-        # read_line_with_cycle returns/raises, when _edit_loop's buffer is
-        # no longer reachable) can still compute where the footer ended up.
+        # 0-indexed row (from the input's own first row) the cursor is
+        # currently sitting on — 0 before the first render, since nothing
+        # has been drawn yet and the cursor is right where the input row
+        # starts. Every render moves up exactly this many rows before
+        # redrawing, then updates it to reflect where it left off.
+        last_cursor_row = 0
         last_text = ""
 
         def _render(text: str, cursor: int, selection: tuple[int, int] | None) -> None:
-            nonlocal last_text
+            nonlocal last_text, last_cursor_row
             last_text = text
 
-            sys.stdout.write("\x1b8\x1b[0J")  # anchor, wipe any longer previous render
+            if last_cursor_row:
+                sys.stdout.write(f"\x1b[{last_cursor_row}A")
+            sys.stdout.write("\r\x1b[0J")  # column 0, wipe any longer previous render
+
             if selection is None:
                 sys.stdout.write(prompt + text)
             else:
@@ -654,42 +670,40 @@ class InteractiveSession:
                 lo, hi = selection
                 sys.stdout.write(prompt + text[:lo] + "\x1b[7m" + text[lo:hi] + "\x1b[27m" + text[hi:])
 
-            # Row the footer's top (bottom rule) line starts on: right
-            # after the last character, *unless* that character exactly
-            # filled its row (column 1 of the row after it — an empty,
-            # not-yet-used row), in which case the footer starts there
-            # instead of one further down.
-            end_row, end_col = _row_col(prompt_visible_len + len(text))
-            footer_row = end_row if end_col == 1 else end_row + 1
-
-            sys.stdout.write("\x1b8")
-            if footer_row:
-                sys.stdout.write(f"\x1b[{footer_row}B")
-            sys.stdout.write("\r")
+            # The footer always starts on the row right after the input's
+            # own last row, via an explicit \r\n — not by relying on the
+            # terminal's autowrap eventually carrying it there, which
+            # inherits the same deferred-wrap ambiguity _row_col_after
+            # documents (whether a just-filled row already counts as
+            # "used" is exactly what's unclear about that pending state;
+            # an explicit \r\n sidesteps needing an answer).
+            input_last_row, _ = _row_col_after(prompt_visible_len + len(text))
             footer_lines = [self._state_line(), self._mode_line()]
             if repo_line:
                 footer_lines.append(repo_line)
             with _console.capture() as capture:
                 _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
-            sys.stdout.write(capture.get().replace("\n", "\r\n"))
+            sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
 
-            cursor_row, cursor_col = _row_col(prompt_visible_len + cursor)
-            sys.stdout.write("\x1b8")
-            if cursor_row:
-                sys.stdout.write(f"\x1b[{cursor_row}B")
+            footer_last_row = input_last_row + footer_rows
+            cursor_row, cursor_col = _row_col_after(prompt_visible_len + cursor)
+            rows_up = footer_last_row - cursor_row
+            if rows_up:
+                sys.stdout.write(f"\x1b[{rows_up}A")
             sys.stdout.write(f"\x1b[{cursor_col}G")
             sys.stdout.flush()
+
+            last_cursor_row = cursor_row
 
         def on_cycle() -> None:
             self._cycle_permission_mode()
 
         def land_below_footer() -> None:
-            end_row, end_col = _row_col(prompt_visible_len + len(last_text))
-            footer_row = end_row if end_col == 1 else end_row + 1
-            landing_row = footer_row + footer_rows
-            sys.stdout.write("\x1b8")
-            if landing_row:
-                sys.stdout.write(f"\x1b[{landing_row}B")
+            input_last_row, _ = _row_col_after(prompt_visible_len + len(last_text))
+            footer_last_row = input_last_row + footer_rows
+            rows_down = footer_last_row - last_cursor_row
+            if rows_down:
+                sys.stdout.write(f"\x1b[{rows_down}B")
             # A real \r\n for the last step (not another CSI-B) so the
             # terminal scrolls if the footer was sitting at the bottom of
             # the visible viewport — cursor-only movement would just clamp
