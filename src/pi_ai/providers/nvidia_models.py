@@ -1,19 +1,29 @@
 """NVIDIA-hosted OpenAI-compatible chat models, with an automatic
 fallback chain across several of them.
 
-Registers Nemotron 3 Super/Ultra, gpt-oss 120B/20B, and MiniMax M3 (all
-served from the same ``integrate.api.nvidia.com`` OpenAI-compatible
-endpoint as ``nvidia_glm.py``'s GLM 5.2 — this module generalizes that
-file's streaming/parsing logic instead of duplicating it once per model
-id) as individually selectable models, plus one extra "auto" model
-(``nvidia/auto``) that tries the four largest of them in order and
-automatically retries the next one on a connection failure or non-2xx
-status — *before* any content has streamed back to the caller. A failure
-partway through an already-started response is reported as a normal
-error instead, never retried: the caller may already be showing that
-partial content, and silently discarding it to start over on a
+Registers Nemotron 3 Super/Ultra, gpt-oss 120B/20B, MiniMax M3, and two
+vision-capable models (Gemma 4 31B, Llama 3.2 90B Vision) — all served
+from the same ``integrate.api.nvidia.com`` OpenAI-compatible endpoint as
+``nvidia_glm.py``'s GLM 5.2 — this module generalizes that file's
+streaming/parsing logic instead of duplicating it once per model id) as
+individually selectable models, plus one extra "auto" model
+(``nvidia/auto``) that tries the four Nemotron/gpt-oss models in order
+and automatically retries the next one on a connection failure or
+non-2xx status — *before* any content has streamed back to the caller. A
+failure partway through an already-started response is reported as a
+normal error instead, never retried: the caller may already be showing
+that partial content, and silently discarding it to start over on a
 different model would be a worse experience than just surfacing the
-error.
+error. MiniMax and the two vision models are deliberately not part of
+that chain — different model families, not equivalent substitutes for
+the text-only Nemotron/gpt-oss lineup it's for.
+
+User messages with image content translate to OpenAI's
+``image_url``/data-URI content-part shape, matching how
+``pi_ai.providers.openai`` already does the same conversion for
+``ImageContent`` blocks (``pi_ai``'s images always carry base64 data,
+not a bare remote URL, so a data URI is the only faithful translation
+regardless of what the original source image was).
 
 Usage:
     export NVAPI_KEY=***
@@ -43,6 +53,7 @@ from pi_ai import (
     Context,
     DoneEvent,
     ErrorEvent,
+    ImageContent,
     Model,
     StartEvent,
     StopReason,
@@ -79,9 +90,14 @@ class _ModelSpec:
     enable_thinking: bool = False
     # Included in the fallback chain nvidia/auto walks through.
     in_fallback_chain: bool = True
+    # Whether this model accepts ImageContent in a user message — set on
+    # Model.input so a caller can tell which models can actually use one.
+    supports_images: bool = False
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
 
 
-# default max_tokens/top_p match each model's own NVIDIA API example.
+# default max_tokens/top_p/penalties match each model's own NVIDIA API example.
 _MODEL_SPECS: list[_ModelSpec] = [
     _ModelSpec(
         "nvidia/nemotron-3-super-120b-a12b",
@@ -102,6 +118,27 @@ _MODEL_SPECS: list[_ModelSpec] = [
     _ModelSpec("openai/gpt-oss-120b", "GPT-OSS 120B", 131072, 4096, top_p=1.0),
     _ModelSpec("openai/gpt-oss-20b", "GPT-OSS 20B", 131072, 4096, top_p=1.0),
     _ModelSpec(DEFAULT_MODEL_ID, "MiniMax M3", 8192, 8192, top_p=0.95, in_fallback_chain=False),
+    _ModelSpec(
+        "google/gemma-4-31b-it",
+        "Gemma 4 31B (vision)",
+        131072,
+        16384,
+        top_p=0.95,
+        enable_thinking=True,
+        in_fallback_chain=False,
+        supports_images=True,
+    ),
+    _ModelSpec(
+        "meta/llama-3.2-90b-vision-instruct",
+        "Llama 3.2 90B Vision",
+        131072,
+        512,
+        top_p=1.0,
+        in_fallback_chain=False,
+        supports_images=True,
+        frequency_penalty=0,
+        presence_penalty=0,
+    ),
 ]
 
 
@@ -111,6 +148,24 @@ class _UpstreamUnavailable(Exception):
     fallback chain retries the next model for."""
 
 
+def _user_content_to_openai(content: str | list[Any]) -> str | list[dict[str, Any]]:
+    """OpenAI content-part translation for a user message — plain string
+    stays a string, otherwise TextContent/ImageContent blocks become
+    ``{"type": "text", ...}``/``{"type": "image_url", ...}`` parts,
+    mirroring ``pi_ai.providers.openai``'s ``_content_to_openai`` exactly
+    (ImageContent only ever carries base64 data, never a bare remote URL,
+    so a data URI is the only faithful translation here too)."""
+    if isinstance(content, str):
+        return content
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if isinstance(block, TextContent):
+            parts.append({"type": "text", "text": block.text})
+        elif isinstance(block, ImageContent):
+            parts.append({"type": "image_url", "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"}})
+    return parts
+
+
 def _openai_messages(context: Context) -> list[dict[str, Any]]:
     """Translate pi_ai's Context.messages into OpenAI chat-completions
     message dicts — every model here is on the same OpenAI-compatible
@@ -118,12 +173,7 @@ def _openai_messages(context: Context) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if isinstance(msg, UserMessage):
-            content = (
-                msg.content
-                if isinstance(msg.content, str)
-                else "".join(c.text if hasattr(c, "text") else "" for c in msg.content)
-            )
-            messages.append({"role": "user", "content": content})
+            messages.append({"role": "user", "content": _user_content_to_openai(msg.content)})
         elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
@@ -328,6 +378,10 @@ async def _stream_one_model(
     }
     if spec.enable_thinking:
         payload["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+    if spec.frequency_penalty is not None:
+        payload["frequency_penalty"] = spec.frequency_penalty
+    if spec.presence_penalty is not None:
+        payload["presence_penalty"] = spec.presence_penalty
     if context.tools:
         payload["tools"] = [
             {
@@ -432,6 +486,7 @@ def nvidia_models_provider(
             provider="nvidia",
             context_window=spec.context_window,
             max_tokens=spec.max_tokens,
+            input=["text", "image"] if spec.supports_images else ["text"],
         )
         catalog.append(m)
         per_model_stream_fns[spec.model_id] = _single_model_stream_fn(spec, key)

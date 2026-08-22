@@ -12,7 +12,7 @@ import json
 import httpx
 import pytest
 
-from pi_ai import Context, Model, StopReason, TextContent, ThinkingContent, ToolCall, UserMessage
+from pi_ai import Context, ImageContent, Model, StopReason, TextContent, ThinkingContent, ToolCall, UserMessage
 from pi_ai.providers.nvidia_models import _MODEL_SPECS, AUTO_MODEL_ID, DEFAULT_MODEL_ID, nvidia_models_provider
 
 
@@ -52,6 +52,24 @@ class TestNvidiaModelsProvider:
         directly selectable, just not part of that fallback sequence."""
         default_spec = next(spec for spec in _MODEL_SPECS if spec.model_id == DEFAULT_MODEL_ID)
         assert default_spec.in_fallback_chain is False
+
+    def test_registers_the_two_vision_models(self) -> None:
+        _model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        ids = {m.id for m in models.get_models("nvidia")}
+        assert "google/gemma-4-31b-it" in ids
+        assert "meta/llama-3.2-90b-vision-instruct" in ids
+
+    def test_vision_models_declare_image_input_support(self) -> None:
+        _model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        by_id = {m.id: m for m in models.get_models("nvidia")}
+        assert by_id["google/gemma-4-31b-it"].input == ["text", "image"]
+        assert by_id["meta/llama-3.2-90b-vision-instruct"].input == ["text", "image"]
+        assert by_id[DEFAULT_MODEL_ID].input == ["text"]
+
+    def test_vision_models_are_not_in_the_auto_fallback_chain(self) -> None:
+        for model_id in ("google/gemma-4-31b-it", "meta/llama-3.2-90b-vision-instruct"):
+            spec = next(s for s in _MODEL_SPECS if s.model_id == model_id)
+            assert spec.in_fallback_chain is False
 
 
 class TestSingleModelStreaming:
@@ -270,6 +288,89 @@ class TestPerModelPayload:
             mod.httpx.AsyncClient = original_client
 
         assert captured["temperature"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_image_content_becomes_an_image_url_data_uri(self) -> None:
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        target = next(m for m in models.get_models("nvidia") if m.id == "google/gemma-4-31b-it")
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            message = UserMessage(
+                content=[
+                    TextContent(text="What is in this image?"),
+                    ImageContent(data="Zm9v", mime_type="image/jpeg"),
+                ]
+            )
+            await models.stream(target, Context(messages=[message])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        sent_content = captured["messages"][0]["content"]  # type: ignore[index]
+        assert sent_content == [
+            {"type": "text", "text": "What is in this image?"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Zm9v"}},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_llama_vision_sends_its_penalty_params(self) -> None:
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        target = next(m for m in models.get_models("nvidia") if m.id == "meta/llama-3.2-90b-vision-instruct")
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            await models.stream(target, Context(messages=[UserMessage(content="hi")])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        assert captured["frequency_penalty"] == 0
+        assert captured["presence_penalty"] == 0
+        assert captured["top_p"] == 1.0
+        assert "extra_body" not in captured
+
+    @pytest.mark.asyncio
+    async def test_other_models_do_not_send_penalty_params(self) -> None:
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        target = next(m for m in models.get_models("nvidia") if m.id == _MODEL_SPECS[0].model_id)
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            await models.stream(target, Context(messages=[UserMessage(content="hi")])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        assert "frequency_penalty" not in captured
+        assert "presence_penalty" not in captured
 
 
 class TestAutoFallbackChain:
