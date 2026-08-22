@@ -6,14 +6,27 @@ Mirrors packages/coding-agent/src/core/tools/.
 from __future__ import annotations
 
 import difflib
+import html
 import os
 import re
 import subprocess
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from pi_agent_core.shell import build_subprocess_args
+
+try:
+    from playwright.sync_api import sync_playwright
+
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
+_MAX_FETCH_CHARS = 50_000
 
 
 @dataclass
@@ -312,4 +325,127 @@ def list_files(
     return ToolResult(
         content=[_text_content(output)],
         details={"path": str(search_path), "itemCount": len(results)},
+    )
+
+
+# --- Web fetch tool ---
+
+
+class _TextExtractor(HTMLParser):
+    """Minimal HTML-to-text extraction — good enough for reading docs
+    pages and API responses without pulling in a full HTML/CSS-aware
+    parsing dependency for it. Skips <script>/<style>/<noscript>
+    content; everything else is joined as plain whitespace-separated
+    text, in document order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._skip_depth = 0
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in ("script", "style", "noscript"):
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style", "noscript") and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0 and data.strip():
+            self.chunks.append(data.strip())
+
+
+def _html_to_text(markup: str) -> str:
+    extractor = _TextExtractor()
+    extractor.feed(markup)
+    return html.unescape("\n".join(extractor.chunks))
+
+
+def fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+    """Fetch a URL over plain HTTP(S) and return its text content.
+
+    Mirrors nothing in the TypeScript original — this and browser_fetch_url
+    are new tools, not a port. Doesn't execute JavaScript: for pages whose
+    content is rendered client-side, this comes back near-empty (an
+    app-shell with no real content) despite a 200 status — that's the
+    signal to use the `browser` tool instead.
+    """
+    try:
+        response = httpx.get(
+            url,
+            timeout=timeout,
+            follow_redirects=True,
+            headers={"User-Agent": "pi-coding-agent/1.0"},
+        )
+    except httpx.HTTPError as exc:
+        return ToolResult(content=[_text_content(f"Error fetching {url}: {exc}")], is_error=True)
+
+    if response.status_code >= 400:
+        return ToolResult(
+            content=[_text_content(f"HTTP {response.status_code} fetching {url}")],
+            details={"url": url, "statusCode": response.status_code},
+            is_error=True,
+        )
+
+    content_type = response.headers.get("content-type", "")
+    text = _html_to_text(response.text) if "html" in content_type else response.text
+    truncated = len(text) > _MAX_FETCH_CHARS
+    output = (text[:_MAX_FETCH_CHARS] if truncated else text).strip() or "(empty response)"
+    if truncated:
+        output += f"\n\n... (truncated at {_MAX_FETCH_CHARS} characters)"
+
+    return ToolResult(
+        content=[_text_content(output)],
+        details={"url": url, "statusCode": response.status_code, "contentType": content_type},
+    )
+
+
+# --- Browser tool (optional: requires the `browser` extra) ---
+
+
+def browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+    """Load a URL in a real headless browser and return the rendered
+    page's visible text — for JavaScript-rendered pages `fetch_url` can't
+    read. Requires Playwright (``pip install 'python-pi[browser]'`` plus
+    ``playwright install chromium``); reports that requirement as an
+    error result rather than raising if it isn't installed, so the model
+    can fall back to `fetch_url` or tell the user instead of the turn
+    just failing.
+    """
+    if not _PLAYWRIGHT_AVAILABLE:
+        return ToolResult(
+            content=[
+                _text_content(
+                    "The browser tool requires Playwright, which isn't installed in this "
+                    "environment. Install it with: pip install 'python-pi[browser]' && "
+                    "playwright install chromium"
+                )
+            ],
+            is_error=True,
+        )
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
+                title = page.title()
+                text = page.inner_text("body")
+            finally:
+                browser.close()
+    except Exception as exc:
+        return ToolResult(content=[_text_content(f"Error loading {url} in browser: {exc}")], is_error=True)
+
+    truncated = len(text) > _MAX_FETCH_CHARS
+    body = (text[:_MAX_FETCH_CHARS] if truncated else text).strip()
+    output = f"# {title}\n\n{body}" if title else body
+    output = output or "(empty page)"
+    if truncated:
+        output += f"\n\n... (truncated at {_MAX_FETCH_CHARS} characters)"
+
+    return ToolResult(
+        content=[_text_content(output)],
+        details={"url": url, "title": title},
     )

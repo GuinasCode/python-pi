@@ -50,7 +50,17 @@ from pi_coding_agent.extensions.events import (
 )
 from pi_coding_agent.resource_loader import LoadedResources, load_resources
 from pi_coding_agent.system_prompt import BuildSystemPromptOptions, build_system_prompt
-from pi_coding_agent.tools import ToolResult, edit_file, execute_bash, grep_search, list_files, read_file, write_file
+from pi_coding_agent.tools import (
+    ToolResult,
+    browser_fetch_url,
+    edit_file,
+    execute_bash,
+    fetch_url,
+    grep_search,
+    list_files,
+    read_file,
+    write_file,
+)
 from pi_memory import MemoryStore, create_memory_tools
 
 
@@ -196,6 +206,39 @@ def get_builtin_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="webfetch",
+            description=(
+                "Fetch a URL over plain HTTP(S) and return its text content. Doesn't execute "
+                "JavaScript — if the result looks like an empty app shell despite a 200 status, "
+                "the page is client-side rendered; use the `browser` tool instead."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to fetch"},
+                    "timeout": {"type": "number", "description": "Timeout in seconds", "default": 30},
+                },
+                "required": ["url"],
+            },
+        ),
+        Tool(
+            name="browser",
+            description=(
+                "Load a URL in a real headless browser and return the rendered page's visible "
+                "text. Slower than `webfetch` — prefer that first, and use this one for pages "
+                "whose content only appears after JavaScript runs (a near-empty `webfetch` "
+                "result despite a 200 status is the usual sign)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to open"},
+                    "timeout": {"type": "number", "description": "Timeout in seconds", "default": 30},
+                },
+                "required": ["url"],
+            },
+        ),
     ]
 
 
@@ -233,6 +276,10 @@ def _execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
             args.get("path", "."),
             max_depth=args.get("max_depth", 3),
         )
+    if name == "webfetch":
+        return fetch_url(args.get("url", ""), timeout=args.get("timeout", 30))
+    if name == "browser":
+        return browser_fetch_url(args.get("url", ""), timeout=args.get("timeout", 30))
     return ToolResult(
         content=[{"type": "text", "text": f"Unknown tool: {name}"}],
         is_error=True,

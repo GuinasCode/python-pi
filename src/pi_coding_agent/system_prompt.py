@@ -85,6 +85,25 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     if has_bash and not has_grep and not has_find and not has_ls:
         add_guideline("Use bash for file operations like ls, rg, find")
 
+    has_webfetch = "webfetch" in tools
+    has_browser = "browser" in tools
+    if has_webfetch and has_browser:
+        add_guideline(
+            "You have real web access — use it rather than declining or asking the user to fetch "
+            "something for you. Try `webfetch` first (fast, no JavaScript); if the result looks "
+            "like an empty app shell despite a 200 status, the page is client-side rendered — use "
+            "`browser` instead, which runs a real headless browser and returns the rendered page's "
+            "text. If `browser` reports Playwright isn't installed, say so plainly rather than "
+            "silently giving up or fabricating results."
+        )
+    elif has_webfetch:
+        add_guideline(
+            "You have real web access via `webfetch` — use it rather than declining or asking the "
+            "user to fetch something for you. It doesn't execute JavaScript, so client-side "
+            "rendered pages may come back as an empty app shell; say so plainly if that happens "
+            "rather than fabricating results."
+        )
+
     for guideline in options.prompt_guidelines or []:
         normalized = guideline.strip()
         if normalized:

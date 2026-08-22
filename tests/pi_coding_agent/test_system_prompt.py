@@ -119,6 +119,29 @@ def test_custom_prompt_skips_contract_guideline() -> None:
     assert "literal contract" not in prompt
 
 
+def test_web_tools_guideline_present_when_both_registered() -> None:
+    """Without an explicit nudge, the model tends to decline/ask for web
+    content instead of just calling webfetch/browser — this guideline is
+    what fixes that."""
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp", selected_tools=["webfetch", "browser"]))
+    assert "You have real web access" in prompt
+    assert "webfetch" in prompt
+    assert "browser" in prompt
+
+
+def test_web_tools_guideline_shorter_when_only_webfetch_registered() -> None:
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp", selected_tools=["webfetch"]))
+    assert "You have real web access via `webfetch`" in prompt
+    # the two-tool phrasing (with the browser fallback instructions) must
+    # not appear when browser isn't actually registered
+    assert "use `browser` instead" not in prompt
+
+
+def test_web_tools_guideline_absent_without_web_tools() -> None:
+    prompt = build_system_prompt(BuildSystemPromptOptions(cwd="/tmp", selected_tools=["read", "bash"]))
+    assert "real web access" not in prompt
+
+
 def test_referenced_docs_and_example_paths_actually_exist() -> None:
     """The paths the system prompt tells the model to read must be real —
     a broken path here means the model gets sent to read nothing."""

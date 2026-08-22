@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
 from pi_agent_core.shell import resolve_posix_shell
 from pi_coding_agent.tools import (
+    _PLAYWRIGHT_AVAILABLE,
+    _html_to_text,
+    browser_fetch_url,
     edit_file,
     execute_bash,
+    fetch_url,
     grep_search,
     list_files,
     read_file,
@@ -163,3 +169,91 @@ class TestListFiles:
     def test_list_nonexistent_directory(self) -> None:
         result = list_files("/nonexistent/path")
         assert result.is_error
+
+
+class TestHtmlToText:
+    def test_strips_tags_and_keeps_text(self) -> None:
+        markup = "<html><body><h1>Title</h1><p>Hello <b>world</b></p></body></html>"
+        text = _html_to_text(markup)
+        assert "Title" in text
+        assert "Hello" in text
+        assert "world" in text
+        assert "<" not in text
+
+    def test_skips_script_and_style_content(self) -> None:
+        markup = "<html><body><script>evil()</script><style>.x{}</style><p>real content</p></body></html>"
+        text = _html_to_text(markup)
+        assert "real content" in text
+        assert "evil" not in text
+
+    def test_unescapes_html_entities(self) -> None:
+        text = _html_to_text("<p>Fish &amp; Chips &mdash; caf&eacute;</p>")
+        assert "Fish & Chips" in text
+        assert "café" in text
+
+
+class TestFetchUrl:
+    def test_returns_plain_text_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+        monkeypatch.setattr(httpx, "get", lambda *_a, **_k: response)
+        result = fetch_url("https://example.com")
+        assert not result.is_error
+        assert "hello world" in result.content[0]["text"]
+
+    def test_strips_html_and_skips_scripts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        markup = b"<html><body><h1>Title</h1><script>evil()</script></body></html>"
+        response = httpx.Response(200, content=markup, headers={"content-type": "text/html; charset=utf-8"})
+        monkeypatch.setattr(httpx, "get", lambda *_a, **_k: response)
+        result = fetch_url("https://example.com")
+        assert not result.is_error
+        text = result.content[0]["text"]
+        assert "Title" in text
+        assert "evil" not in text
+
+    def test_reports_http_error_status(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = httpx.Response(404, content=b"not found", headers={"content-type": "text/plain"})
+        monkeypatch.setattr(httpx, "get", lambda *_a, **_k: response)
+        result = fetch_url("https://example.com/missing")
+        assert result.is_error
+        assert "404" in result.content[0]["text"]
+
+    def test_reports_connection_errors_without_raising(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*_a: Any, **_k: Any) -> httpx.Response:
+            raise httpx.ConnectError("boom")
+
+        monkeypatch.setattr(httpx, "get", _raise)
+        result = fetch_url("https://unreachable.example.com")
+        assert result.is_error
+        assert "boom" in result.content[0]["text"]
+
+    def test_empty_response_says_so(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = httpx.Response(200, content=b"", headers={"content-type": "text/plain"})
+        monkeypatch.setattr(httpx, "get", lambda *_a, **_k: response)
+        result = fetch_url("https://example.com/empty")
+        assert not result.is_error
+        assert "empty response" in result.content[0]["text"]
+
+    def test_truncates_long_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        long_text = "x" * 100_000
+        response = httpx.Response(200, content=long_text.encode(), headers={"content-type": "text/plain"})
+        monkeypatch.setattr(httpx, "get", lambda *_a, **_k: response)
+        result = fetch_url("https://example.com/huge")
+        assert not result.is_error
+        assert "truncated" in result.content[0]["text"]
+
+
+class TestBrowserFetchUrl:
+    def test_reports_missing_playwright_as_an_error_not_a_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_coding_agent.tools as tools_module
+
+        monkeypatch.setattr(tools_module, "_PLAYWRIGHT_AVAILABLE", False)
+        result = browser_fetch_url("https://example.com")
+        assert result.is_error
+        assert "Playwright" in result.content[0]["text"]
+        assert "pip install" in result.content[0]["text"]
+
+    @pytest.mark.skipif(not _PLAYWRIGHT_AVAILABLE, reason="requires the optional `browser` extra")
+    def test_loads_a_real_page_when_playwright_is_installed(self) -> None:
+        result = browser_fetch_url("https://example.com")
+        assert not result.is_error
+        assert "Example Domain" in result.content[0]["text"]

@@ -482,3 +482,46 @@ class TestExtensionLifecycleEvents:
         tool_results = [m for m in session._messages if getattr(m, "role", "") == "toolResult"]
         assert len(tool_results) == 1
         assert tool_results[0].is_error is True
+
+
+class TestBuiltinWebTools:
+    def test_get_builtin_tools_includes_webfetch_and_browser(self) -> None:
+        from pi_coding_agent.agent_session import get_builtin_tools
+
+        names = {t.name for t in get_builtin_tools()}
+        assert "webfetch" in names
+        assert "browser" in names
+
+    def test_execute_tool_dispatches_webfetch(self, monkeypatch: Any) -> None:
+        import pi_coding_agent.agent_session as agent_session_module
+        from pi_coding_agent.agent_session import _execute_tool
+        from pi_coding_agent.tools import ToolResult
+
+        calls: list[tuple[str, float]] = []
+
+        def _fake_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+            calls.append((url, timeout))
+            return ToolResult(content=[{"type": "text", "text": "fetched"}])
+
+        monkeypatch.setattr(agent_session_module, "fetch_url", _fake_fetch_url)
+        result = _execute_tool("webfetch", {"url": "https://example.com", "timeout": 5})
+        assert not result.is_error
+        assert result.content[0]["text"] == "fetched"
+        assert calls == [("https://example.com", 5)]
+
+    def test_execute_tool_dispatches_browser(self, monkeypatch: Any) -> None:
+        import pi_coding_agent.agent_session as agent_session_module
+        from pi_coding_agent.agent_session import _execute_tool
+        from pi_coding_agent.tools import ToolResult
+
+        calls: list[tuple[str, float]] = []
+
+        def _fake_browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+            calls.append((url, timeout))
+            return ToolResult(content=[{"type": "text", "text": "rendered"}])
+
+        monkeypatch.setattr(agent_session_module, "browser_fetch_url", _fake_browser_fetch_url)
+        result = _execute_tool("browser", {"url": "https://example.com", "timeout": 5})
+        assert not result.is_error
+        assert result.content[0]["text"] == "rendered"
+        assert calls == [("https://example.com", 5)]
