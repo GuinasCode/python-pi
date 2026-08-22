@@ -344,6 +344,10 @@ class TestRenderingHooksIntegration:
         assert printed == ["[custom] starting write"]
 
 
+_Render = tuple[str, int, tuple[int, int] | None]
+_RenderInput = str | tuple[str, int] | _Render
+
+
 class TestPromptInputFullRedraw:
     """_prompt_input's live footer used to corrupt the screen once typed
     input wrapped past one terminal row (fixed row-offset assumptions
@@ -360,13 +364,21 @@ class TestPromptInputFullRedraw:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
         width: int,
-        renders: list[str] | list[tuple[str, int]],
+        renders: list[_RenderInput],
     ) -> tuple[str, str]:
-        # A bare str means "cursor at the end", matching plain
-        # append-while-typing — most tests don't care about mid-buffer
-        # cursor positions, only TestCursorNavigationRendering does.
-        pairs = [r if isinstance(r, tuple) else (r, len(r)) for r in renders]
-        final_text = pairs[-1][0] if pairs else ""
+        # A bare str means "cursor at the end, no selection"; a 2-tuple
+        # adds an explicit cursor; a 3-tuple adds a selection too — most
+        # tests don't care about mid-buffer cursor/selection, only
+        # test_cursor_* and test_selection_* below do.
+        def _normalize(r: _RenderInput) -> _Render:
+            if isinstance(r, str):
+                return r, len(r), None
+            if len(r) == 2:
+                return r[0], r[1], None
+            return r
+
+        triples = [_normalize(r) for r in renders]
+        final_text = triples[-1][0] if triples else ""
 
         import pi_coding_agent.interactive_mode as interactive_mode
 
@@ -374,11 +386,11 @@ class TestPromptInputFullRedraw:
         monkeypatch.setattr(interactive_mode, "_console", Console(width=width, force_terminal=True))
 
         def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
-            on_render("", 0)
-            for text, cursor in pairs:
-                on_render(text, cursor)
+            on_render("", 0, None)
+            for text, cursor, selection in triples:
+                on_render(text, cursor, selection)
             on_cycle()
-            on_render(final_text, len(final_text))
+            on_render(final_text, len(final_text), None)
             return final_text
 
         monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
@@ -440,6 +452,19 @@ class TestPromptInputFullRedraw:
         )
         assert result == text
         self._assert_columns_in_range(output, width=20)
+
+    def test_selection_is_wrapped_in_reverse_video(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        result, output = self._run_with_fake_input(
+            monkeypatch, tmp_path, width=40, renders=[("hello", 5, None), ("hello", 2, (2, 5))]
+        )
+        assert result == "hello"
+        assert "\x1b[7mllo\x1b[27m" in output
+        self._assert_columns_in_range(output, width=40)
+
+    def test_no_selection_writes_no_reverse_video_codes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _, output = self._run_with_fake_input(monkeypatch, tmp_path, width=40, renders=["hi"])
+        assert "\x1b[7m" not in output
+        assert "\x1b[27m" not in output
 
     @staticmethod
     def _assert_columns_in_range(output: str, *, width: int) -> None:

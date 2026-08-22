@@ -640,12 +640,19 @@ class InteractiveSession:
         # no longer reachable) can still compute where the footer ended up.
         last_text = ""
 
-        def _render(text: str, cursor: int) -> None:
+        def _render(text: str, cursor: int, selection: tuple[int, int] | None) -> None:
             nonlocal last_text
             last_text = text
 
             sys.stdout.write("\x1b8\x1b[0J")  # anchor, wipe any longer previous render
-            sys.stdout.write(prompt + text)
+            if selection is None:
+                sys.stdout.write(prompt + text)
+            else:
+                # SGR 7/27 (reverse video on/off) around the selected span
+                # — zero-width control codes, don't affect the row/column
+                # math below, which only ever counts visible characters.
+                lo, hi = selection
+                sys.stdout.write(prompt + text[:lo] + "\x1b[7m" + text[lo:hi] + "\x1b[27m" + text[hi:])
 
             # Row the footer's top (bottom rule) line starts on: right
             # after the last character, *unless* that character exactly
