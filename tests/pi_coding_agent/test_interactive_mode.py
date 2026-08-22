@@ -154,6 +154,102 @@ def test_interactive_slash_model_with_unknown_id_reports_error_and_does_not_swit
     assert "no such model" in "\n".join(printed)
 
 
+def test_interactive_slash_model_bare_with_a_single_model_reports_it_without_a_picker(tmp_path: Path) -> None:
+    """Nothing to navigate between with only one model configured (the
+    default faux-provider setup here) — /model should just say so, not
+    launch a picker (interactive or dialog-based) with a single option."""
+    session = _make_session(tmp_path)
+    printed: list[str] = []
+    session._output.print = printed.append  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model")) is True
+    output = "\n".join(printed)
+    assert "only model available" in output
+    assert session._model.id == "faux-1"
+
+
+def test_interactive_slash_model_bare_launches_the_repl_picker_when_stdin_is_a_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With multiple models configured and a real (or real-looking) TTY,
+    bare /model should drive the arrow-key picker (pi_tui.raw_input.
+    select_from_list) rather than printing the old plain listing — and
+    switch to whatever index it reports back."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    session._models.set_provider(Provider(id="acme", name="Acme AI", models=[Model(id="acme-large", provider="acme")]))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def _fake_select_from_list(count: int, *, on_render: Any, initial: int) -> int:
+        on_render(initial)
+        return count - 1  # the last entry — acme/acme-large
+
+    monkeypatch.setattr("pi_tui.raw_input.select_from_list", _fake_select_from_list)
+
+    printed: list[str] = []
+    session._output.print = printed.append  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model")) is True
+    assert session._model.provider == "acme"
+    assert session._model.id == "acme-large"
+    assert session._agent_session.get_model().id == "acme-large"
+    assert "switched to" in "\n".join(printed)
+
+
+def test_interactive_slash_model_bare_reports_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Escape/Ctrl+C from the REPL picker (select_from_list returning
+    None) must leave the active model untouched and say so, not silently
+    switch to the first entry."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    original = session._model
+    session._models.set_provider(Provider(id="acme", name="Acme AI", models=[Model(id="acme-large", provider="acme")]))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("pi_tui.raw_input.select_from_list", lambda count, *, on_render, initial: None)
+
+    printed: list[str] = []
+    session._output.print = printed.append  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model")) is True
+    assert session._model is original
+    assert "cancelled" in "\n".join(printed)
+
+
+def test_interactive_slash_model_bare_uses_the_ui_context_when_not_the_noop_one(tmp_path: Path) -> None:
+    """Any front-end with a real ExtensionUIContext (the Textual app) gets
+    its own select() call instead of the REPL's raw-terminal picker —
+    e.g. Textual's SelectDialog, which already handles arrow-key
+    navigation and Enter/Escape natively."""
+    from pi_ai import Model
+    from pi_ai.models import Provider
+
+    session = _make_session(tmp_path)
+    session._models.set_provider(Provider(id="acme", name="Acme AI", models=[Model(id="acme-large", provider="acme")]))
+
+    class _FakeUiContext:
+        def __init__(self) -> None:
+            self.asked: tuple[str, list[str]] | None = None
+
+        async def select(self, message: str, choices: list[str]) -> str | None:
+            self.asked = (message, choices)
+            return choices[-1]
+
+    fake_ui = _FakeUiContext()
+    session._ui_context = fake_ui  # type: ignore[assignment]
+
+    printed: list[str] = []
+    session._output.print = printed.append  # type: ignore[method-assign]
+
+    assert asyncio.run(session._handle_command("/model")) is True
+    assert fake_ui.asked is not None
+    assert "acme/acme-large" in fake_ui.asked[1]
+    assert session._model.id == "acme-large"
+
+
 def test_interactive_slash_clear(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
     assert asyncio.run(session._handle_command("/clear")) is True

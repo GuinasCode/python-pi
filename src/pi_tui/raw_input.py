@@ -55,6 +55,8 @@ import sys
 from collections.abc import Callable, Iterator
 
 _BACKTAB = "\x1b[Z"
+_UP = "\x1b[A"
+_DOWN = "\x1b[B"
 _LEFT = "\x1b[D"
 _RIGHT = "\x1b[C"
 _HOME = "\x1b[H"
@@ -461,3 +463,52 @@ def read_line_with_cycle(
     on_render("", 0, None)
     with _raw_mode():
         return _edit_loop(_read_key, on_render, on_cycle)
+
+
+def _select_loop(read_key: Callable[[], str], count: int, on_render: Callable[[int], None], index: int) -> int | None:
+    """Core selection loop, decoupled from the platform key source for the
+    same testability reason ``_edit_loop`` is. Up/Down move a highlighted
+    index within ``[0, count)``, clamped rather than wrapping (matches
+    ``SelectDialog``, the Textual equivalent); Enter confirms it; Escape,
+    Ctrl+C and Ctrl+D all cancel (return None) rather than only Escape —
+    there's no partially-typed text here worth distinguishing an
+    interrupt from a deliberate cancel over, unlike ``_edit_loop``."""
+    while True:
+        key = read_key()
+
+        if key in ("\r", "\n"):
+            return index
+
+        if key in ("\x1b", "\x03", "\x04"):
+            return None
+
+        if key == _UP:
+            if index > 0:
+                index -= 1
+                on_render(index)
+            continue
+
+        if key == _DOWN:
+            if index < count - 1:
+                index += 1
+                on_render(index)
+            continue
+
+
+def select_from_list(count: int, *, on_render: Callable[[int], None], initial: int = 0) -> int | None:
+    """Let the user pick one of ``count`` items with Up/Down + Enter,
+    calling ``on_render(highlighted_index)`` once up front and again after
+    every move so the caller can (re)draw the list — same split of
+    responsibility as ``read_line_with_cycle``: this function only reads
+    keys and tracks which index is highlighted, the caller owns every
+    byte written to the screen. Returns the confirmed index, or ``None``
+    if cancelled (Escape/Ctrl+C/Ctrl+D) or if stdin isn't a real TTY
+    (piped input has no way to navigate a menu at all).
+    """
+    if count <= 0 or not sys.stdin.isatty():
+        return None
+
+    index = max(0, min(initial, count - 1))
+    on_render(index)
+    with _raw_mode():
+        return _select_loop(_read_key, count, on_render, index)

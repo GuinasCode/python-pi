@@ -846,6 +846,45 @@ class InteractiveSession:
                     return model
         return None
 
+    async def _select_model_interactive_repl(self, choices: list[Model], initial: int) -> Model | None:
+        """Arrow-key model picker for the classic REPL's bare ``/model``.
+
+        Same relative-cursor-movement redraw technique as ``_prompt_input``
+        (see its docstring for why: DECSC/DECRC was tried first and
+        abandoned there after it caused the footer-duplication bug this
+        session already fixed once) — but simpler, since a menu's row
+        count is fixed for its whole lifetime (no wrapping text to
+        account for), so there's no row arithmetic to get wrong beyond
+        "move up exactly as many rows as were drawn last time".
+        """
+        from pi_tui.raw_input import select_from_list
+
+        rows = len(choices)
+
+        def _line(model: Model, highlighted: bool) -> str:
+            label = escape(f"{model.provider}/{model.id}")
+            return f"[reverse {PASTEL_BLUE}]> {label}[/]" if highlighted else f"  {label}"
+
+        drawn = False
+
+        def _render(index: int) -> None:
+            nonlocal drawn
+            if drawn and rows > 1:
+                sys.stdout.write(f"\x1b[{rows - 1}A")
+            sys.stdout.write("\r\x1b[0J")
+            with _console.capture() as capture:
+                _console.print("\n".join(_line(m, i == index) for i, m in enumerate(choices)), end="")
+            sys.stdout.write(capture.get().replace("\n", "\r\n"))
+            sys.stdout.flush()
+            drawn = True
+
+        self._output.print(f"[{DIM_STYLE}]↑/↓ move · enter select · esc cancel[/{DIM_STYLE}]")
+        loop = asyncio.get_running_loop()
+        index = await loop.run_in_executor(None, lambda: select_from_list(rows, on_render=_render, initial=initial))
+        sys.stdout.write("\r\n")
+        sys.stdout.flush()
+        return choices[index] if index is not None else None
+
     async def _handle_command(self, command: str) -> bool:
         """Handle slash commands. Returns True to continue, False to exit."""
         cmd = command.lower().strip()
@@ -858,7 +897,7 @@ class InteractiveSession:
                 "\n[bold]Commands[/bold]\n"
                 f"  [{PASTEL_BLUE}]/help[/{PASTEL_BLUE}]     Show this help\n"
                 f"  [{PASTEL_BLUE}]/exit[/{PASTEL_BLUE}]     Exit Pi\n"
-                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    List providers/models; /model <id> to switch\n"
+                f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Interactive model picker; /model <id> to switch directly\n"
                 f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
@@ -885,27 +924,68 @@ class InteractiveSession:
 
             current_provider = getattr(self._model, "provider", None)
             current_id = getattr(self._model, "id", None)
-            lines = [
-                f"Current: [{PASTEL_BLUE}]{current_provider}[/{PASTEL_BLUE}]/"
-                f"[{PASTEL_BLUE}]{current_id}[/{PASTEL_BLUE}] "
-                f"[dim]({getattr(self._model, 'context_window', '?')} tokens)[/dim]",
-                "",
-            ]
             providers = self._models.get_providers()
-            if not providers:
-                lines.append("[dim]no providers configured[/dim]")
-            for provider in providers:
-                lines.append(f"[bold]{escape(provider.name)}[/bold] [dim]({escape(provider.id)})[/dim]")
-                models = provider.get_models()
-                if not models:
-                    lines.append("  [dim](no models)[/dim]")
-                for model in models:
-                    is_current = provider.id == current_provider and model.id == current_id
-                    marker = f" [{PASTEL_GREEN}]*[/{PASTEL_GREEN}]" if is_current else ""
-                    lines.append(f"  [{PASTEL_BLUE}]{escape(model.id)}[/{PASTEL_BLUE}]{marker}")
-            lines.append("")
-            lines.append("[dim]/model <id> or /model <provider>/<id> to switch[/dim]")
-            self._output.print("\n".join(lines))
+            choices = [model for provider in providers for model in provider.get_models()]
+
+            if not choices:
+                self._output.print("[dim]no providers configured[/dim]")
+                return True
+
+            # Nothing to pick between — showing a picker with one option
+            # would just be an extra keypress for no reason (and, in the
+            # Textual app, a modal dialog nobody asked for).
+            if len(choices) == 1:
+                only = choices[0]
+                only_label = f"{escape(only.provider)}/{escape(only.id)}"
+                self._output.print(f"[dim]only model available:[/dim] [{PASTEL_BLUE}]{only_label}[/{PASTEL_BLUE}]")
+                return True
+
+            # Piped/non-interactive stdin can't navigate a menu at all —
+            # same plain listing this command always showed, unchanged.
+            if isinstance(self._ui_context, NoopExtensionUIContext) and not sys.stdin.isatty():
+                lines = [
+                    f"Current: [{PASTEL_BLUE}]{current_provider}[/{PASTEL_BLUE}]/"
+                    f"[{PASTEL_BLUE}]{current_id}[/{PASTEL_BLUE}] "
+                    f"[dim]({getattr(self._model, 'context_window', '?')} tokens)[/dim]",
+                    "",
+                ]
+                for provider in providers:
+                    lines.append(f"[bold]{escape(provider.name)}[/bold] [dim]({escape(provider.id)})[/dim]")
+                    models = provider.get_models()
+                    if not models:
+                        lines.append("  [dim](no models)[/dim]")
+                    for model in models:
+                        is_current = provider.id == current_provider and model.id == current_id
+                        marker = f" [{PASTEL_GREEN}]*[/{PASTEL_GREEN}]" if is_current else ""
+                        lines.append(f"  [{PASTEL_BLUE}]{escape(model.id)}[/{PASTEL_BLUE}]{marker}")
+                lines.append("")
+                lines.append("[dim]/model <id> or /model <provider>/<id> to switch[/dim]")
+                self._output.print("\n".join(lines))
+                return True
+
+            initial = next(
+                (i for i, m in enumerate(choices) if m.provider == current_provider and m.id == current_id),
+                0,
+            )
+
+            selected: Model | None
+            if isinstance(self._ui_context, NoopExtensionUIContext):
+                selected = await self._select_model_interactive_repl(choices, initial)
+            else:
+                labels = [f"{m.provider}/{m.id}" for m in choices]
+                picked = await self._ui_context.select("Select a model", labels)
+                selected = next((m for m, label in zip(choices, labels, strict=True) if label == picked), None)
+
+            if selected is None:
+                self._output.print("[dim]cancelled[/dim]")
+                return True
+
+            self._model = selected
+            self._agent_session.set_model(selected)
+            self._output.print(
+                f"[{PASTEL_GREEN}]switched to[/{PASTEL_GREEN}] "
+                f"[{PASTEL_BLUE}]{escape(selected.provider)}/{escape(selected.id)}[/{PASTEL_BLUE}]"
+            )
             return True
 
         if cmd == "/clear":

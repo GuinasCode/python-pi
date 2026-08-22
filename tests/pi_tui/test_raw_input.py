@@ -25,6 +25,7 @@ from pi_tui.raw_input import (
     _CTRL_LEFT,
     _CTRL_RIGHT,
     _DELETE,
+    _DOWN,
     _END,
     _HOME,
     _LEFT,
@@ -32,7 +33,9 @@ from pi_tui.raw_input import (
     _SHIFT_BACKSPACE,
     _SHIFT_LEFT,
     _SHIFT_RIGHT,
+    _UP,
     _edit_loop,
+    _select_loop,
 )
 
 Render = tuple[str, int, tuple[int, int] | None]
@@ -54,6 +57,57 @@ def _recorder() -> tuple[Callable[[str, int, tuple[int, int] | None], None], lis
         calls.append((text, cursor, selection))
 
     return _record, calls
+
+
+def _index_recorder() -> tuple[Callable[[int], None], list[int]]:
+    calls: list[int] = []
+    return calls.append, calls
+
+
+class TestSelectLoop:
+    def test_enter_confirms_the_initial_index(self) -> None:
+        assert _select_loop(_keys("\r"), 3, lambda _i: None, 0) == 0
+
+    def test_down_moves_the_highlighted_index_forward(self) -> None:
+        render, calls = _index_recorder()
+        assert _select_loop(_keys(_DOWN, _DOWN, "\r"), 3, render, 0) == 2
+        assert calls == [1, 2]
+
+    def test_up_moves_the_highlighted_index_back(self) -> None:
+        render, calls = _index_recorder()
+        assert _select_loop(_keys(_UP, "\r"), 3, render, 2) == 1
+        assert calls == [1]
+
+    def test_down_clamps_at_the_last_index_without_rerendering(self) -> None:
+        render, calls = _index_recorder()
+        assert _select_loop(_keys(_DOWN, "\r"), 2, render, 1) == 1
+        assert calls == []
+
+    def test_up_clamps_at_zero_without_rerendering(self) -> None:
+        render, calls = _index_recorder()
+        assert _select_loop(_keys(_UP, "\r"), 2, render, 0) == 0
+        assert calls == []
+
+    def test_escape_cancels(self) -> None:
+        assert _select_loop(_keys("\x1b"), 3, lambda _i: None, 1) is None
+
+    def test_ctrl_c_cancels(self) -> None:
+        assert _select_loop(_keys("\x03"), 3, lambda _i: None, 1) is None
+
+    def test_ctrl_d_cancels(self) -> None:
+        assert _select_loop(_keys("\x04"), 3, lambda _i: None, 1) is None
+
+    def test_unrecognized_keys_are_ignored(self) -> None:
+        render, calls = _index_recorder()
+        assert _select_loop(_keys("x", "\t", _LEFT, "\r"), 3, render, 0) == 0
+        assert calls == []
+
+
+class TestSelectFromList:
+    def test_empty_list_returns_none_without_touching_the_terminal(self) -> None:
+        from pi_tui.raw_input import select_from_list
+
+        assert select_from_list(0, on_render=lambda _i: None) is None
 
 
 class TestEditLoop:
