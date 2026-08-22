@@ -6,25 +6,27 @@ just treats it as Tab). To let Shift+Tab drive the permission-mode toggle
 (mirroring Claude Code's "shift+tab to cycle" footer) while still typing a
 message, we read raw keys ourselves.
 
-This is deliberately minimal — no history, no cursor movement/left-right
-editing — just enough line editing (printable chars, backspace, enter,
-Ctrl+C, Ctrl+D) to replace ``input()``, plus the one extra control key.
-When stdin isn't a real TTY (piped input, tests), it falls back to a
-plain ``readline()`` with no cycle detection, matching how ``input()``
-degrades in that situation.
+This is deliberately minimal — no history — just enough line editing
+(printable chars, cursor movement, backspace/delete, enter, Ctrl+C,
+Ctrl+D) to replace ``input()``, plus the one extra control key. When
+stdin isn't a real TTY (piped input, tests), it falls back to a plain
+``readline()`` with no cycle detection, matching how ``input()`` degrades
+in that situation.
 
 Unlike a typical line editor, this one doesn't echo characters itself —
-every buffer mutation (character typed, backspace) and every Shift+Tab
-calls the caller's ``on_render(current_text)``, handing it full control
-of what gets drawn. That split exists because the caller (interactive
-mode) shows a live status footer right below the input, and the input
-itself can wrap across multiple terminal rows once it's long enough —
-patching the screen incrementally in place while tracking exactly how
-many rows the wrapped input currently occupies is fragile row-arithmetic
-that isn't this module's job to get right; letting the caller redraw
-everything from a fixed anchor on every keystroke sidesteps needing that
-arithmetic at all, at a cost (a full repaint per keystroke) a human's
-typing rate makes unnoticeable.
+every buffer mutation (character typed, cursor moved, backspace/delete)
+and every Shift+Tab calls the caller's ``on_render(current_text,
+cursor_index)``, handing it full control of what gets drawn. That split
+exists because the caller (interactive mode) shows a live status footer
+right below the input, and the input itself can wrap across multiple
+terminal rows once it's long enough — patching the screen incrementally
+in place while tracking exactly how many rows the wrapped input
+currently occupies (and where within them the cursor now sits, once it
+can move anywhere in the buffer rather than always the end) is fragile
+row-arithmetic that isn't this module's job to get right; letting the
+caller redraw everything from a fixed anchor on every keystroke
+sidesteps needing that arithmetic at all, at a cost (a full repaint per
+keystroke) a human's typing rate makes unnoticeable.
 
 Shift+Tab is reported as the CSI "backtab" sequence ESC [ Z on both
 platforms, normalized to the same internal sentinel below:
@@ -48,19 +50,43 @@ import sys
 from collections.abc import Callable, Iterator
 
 _BACKTAB = "\x1b[Z"
+_LEFT = "\x1b[D"
+_RIGHT = "\x1b[C"
+_HOME = "\x1b[H"
+_END = "\x1b[F"
+_DELETE = "\x1b[3~"
+
+
+def _is_csi_final_byte(ch: str) -> bool:
+    """True for the byte that ends a CSI escape sequence (ECMA-48: a
+    letter or ``~``, following ESC ``[`` and any digit/``;`` parameter
+    bytes) — e.g. the ``D``/``C``/``Z`` in ``ESC[D``/``ESC[C``/``ESC[Z``,
+    or the ``~`` in ``ESC[3~``. Both platforms' ``_read_key`` stop
+    accumulating a sequence as soon as they see one, instead of always
+    waiting out the full per-byte timeout even for the common 3-byte
+    sequences (arrows, Shift+Tab) — only the rarer 4-byte ones like
+    Delete actually need that extra wait."""
+    return ch.isalpha() or ch == "~"
 
 
 def _edit_loop(
     read_key: Callable[[], str],
-    on_render: Callable[[str], None],
+    on_render: Callable[[str, int], None],
     on_cycle: Callable[[], None],
 ) -> str:
     """Core line-editing loop, decoupled from the platform key source so it
     can be unit-tested with a fake ``read_key``. Terminal writes here are
     limited to what submitting/interrupting needs — everything about
     what's currently on screen while the user is still typing is the
-    caller's ``on_render``, not this loop's."""
+    caller's ``on_render``, not this loop's.
+
+    ``cursor`` is a plain index into ``buf`` (0..len(buf)) — typed
+    characters insert there (not just append), Backspace/Delete remove
+    the character behind/ahead of it, and Left/Right/Home/End move it
+    without touching the buffer.
+    """
     buf: list[str] = []
+    cursor = 0
     while True:
         key = read_key()
 
@@ -76,23 +102,56 @@ def _edit_loop(
             continue
 
         if key in ("\x7f", "\x08"):  # Backspace
-            if buf:
-                buf.pop()
-                on_render("".join(buf))
+            if cursor > 0:
+                del buf[cursor - 1]
+                cursor -= 1
+                on_render("".join(buf), cursor)
+            continue
+
+        if key == _DELETE:
+            if cursor < len(buf):
+                del buf[cursor]
+                on_render("".join(buf), cursor)
+            continue
+
+        if key == _LEFT:
+            if cursor > 0:
+                cursor -= 1
+                on_render("".join(buf), cursor)
+            continue
+
+        if key == _RIGHT:
+            if cursor < len(buf):
+                cursor += 1
+                on_render("".join(buf), cursor)
+            continue
+
+        if key == _HOME:
+            if cursor != 0:
+                cursor = 0
+                on_render("".join(buf), cursor)
+            continue
+
+        if key == _END:
+            if cursor != len(buf):
+                cursor = len(buf)
+                on_render("".join(buf), cursor)
             continue
 
         if key == _BACKTAB:
             on_cycle()
-            on_render("".join(buf))
+            on_render("".join(buf), cursor)
             continue
 
         if not key or key == "\t" or key.startswith("\x1b"):
-            # Unhandled control/escape sequence (arrows, plain Tab, a lone
-            # Escape press, ...) — swallow rather than inserting garbage.
+            # Unhandled control/escape sequence (an unmapped arrow/function
+            # key, a lone Escape press, ...) — swallow rather than
+            # inserting garbage.
             continue
 
-        buf.append(key)
-        on_render("".join(buf))
+        buf.insert(cursor, key)
+        cursor += 1
+        on_render("".join(buf), cursor)
 
 
 if sys.platform == "win32":
@@ -162,10 +221,17 @@ if sys.platform == "win32":
         if ch != "\x1b":
             return ch
         seq = ch
-        for _ in range(2):
+        # Up to 3 more bytes: covers every sequence _edit_loop recognizes,
+        # including the 4-byte ones (Delete is ESC [ 3 ~) — but stop as
+        # soon as a CSI final byte arrives rather than always waiting out
+        # the timeout, so the common 3-byte sequences aren't delayed by it.
+        for _ in range(3):
             if not _console_char_ready(0.05):
                 break
-            seq += _read_console_char()
+            nxt = _read_console_char()
+            seq += nxt
+            if _is_csi_final_byte(nxt):
+                break
         return seq
 
 else:
@@ -194,26 +260,34 @@ else:
         if ch != "\x1b":
             return ch
         seq = ch
-        for _ in range(2):
+        # Up to 3 more bytes: covers every sequence _edit_loop recognizes,
+        # including the 4-byte ones (Delete is ESC [ 3 ~) — but stop as
+        # soon as a CSI final byte arrives rather than always waiting out
+        # the timeout, so the common 3-byte sequences aren't delayed by it.
+        for _ in range(3):
             ready, _, _ = select.select([sys.stdin], [], [], 0.05)
             if not ready:
                 break
-            seq += sys.stdin.read(1)
+            nxt = sys.stdin.read(1)
+            seq += nxt
+            if _is_csi_final_byte(nxt):
+                break
         return seq
 
 
 def read_line_with_cycle(
     prompt: str,
     *,
-    on_render: Callable[[str], None],
+    on_render: Callable[[str, int], None],
     on_cycle: Callable[[], None],
 ) -> str:
-    """Read one line of input, calling ``on_render(current_text)`` after
-    every keystroke (initially with ``""``, before the user has typed
-    anything) so the caller can draw the prompt/text/any live status
-    around it, and ``on_cycle()`` each time Shift+Tab is pressed (without
-    submitting). Raises ``KeyboardInterrupt`` on Ctrl+C and ``EOFError`` on
-    Ctrl+D at an empty line — same contract as ``input()``.
+    """Read one line of input, calling ``on_render(current_text,
+    cursor_index)`` after every keystroke (initially with ``("", 0)``,
+    before the user has typed anything) so the caller can draw the
+    prompt/text/cursor/any live status around it, and ``on_cycle()`` each
+    time Shift+Tab is pressed (without submitting). Raises
+    ``KeyboardInterrupt`` on Ctrl+C and ``EOFError`` on Ctrl+D at an empty
+    line — same contract as ``input()``.
     """
     if not sys.stdin.isatty():
         # No live rendering possible for piped input — same plain prompt
@@ -225,6 +299,6 @@ def read_line_with_cycle(
             raise EOFError
         return line.rstrip("\n")
 
-    on_render("")
+    on_render("", 0)
     with _raw_mode():
         return _edit_loop(_read_key, on_render, on_cycle)

@@ -357,20 +357,29 @@ class TestPromptInputFullRedraw:
 
     @staticmethod
     def _run_with_fake_input(
-        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, width: int, renders: list[str]
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        width: int,
+        renders: list[str] | list[tuple[str, int]],
     ) -> tuple[str, str]:
+        # A bare str means "cursor at the end", matching plain
+        # append-while-typing — most tests don't care about mid-buffer
+        # cursor positions, only TestCursorNavigationRendering does.
+        pairs = [r if isinstance(r, tuple) else (r, len(r)) for r in renders]
+        final_text = pairs[-1][0] if pairs else ""
+
         import pi_coding_agent.interactive_mode as interactive_mode
 
         session = _make_session(tmp_path)
         monkeypatch.setattr(interactive_mode, "_console", Console(width=width, force_terminal=True))
 
         def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
-            on_render("")
-            for text in renders:
-                on_render(text)
+            on_render("", 0)
+            for text, cursor in pairs:
+                on_render(text, cursor)
             on_cycle()
-            on_render(renders[-1] if renders else "")
-            return renders[-1] if renders else ""
+            on_render(final_text, len(final_text))
+            return final_text
 
         monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
 
@@ -400,8 +409,44 @@ class TestPromptInputFullRedraw:
         assert result == exact_text
         self._assert_columns_in_range(output, width=20)
 
+    def test_cursor_in_the_middle_of_wrapped_text(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Navigating back into already-wrapped text (Left/Home) and
+        editing there used to be impossible (cursor was always pinned to
+        the end) — this exercises _render with the cursor away from the
+        end of a multi-row buffer, the case that needs the general (row,
+        col) positioning rather than "always the last row"."""
+        long_text = "x" * 90
+        result, output = self._run_with_fake_input(
+            monkeypatch,
+            tmp_path,
+            width=20,
+            renders=[
+                (long_text, len(long_text)),
+                (long_text, 5),
+                (long_text[:5] + "Y" + long_text[5:], 6),
+            ],
+        )
+        assert result == long_text[:5] + "Y" + long_text[5:]
+        self._assert_columns_in_range(output, width=20)
+
+    def test_cursor_moved_back_to_column_one_of_a_row(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """Cursor position exactly at a wrap boundary (start of a wrapped
+        row) is the same edge case that needed care for the end-of-text
+        column math — check it doesn't request column 0 or a negative row
+        offset when exercised for an arbitrary (non-end) cursor too."""
+        text = "x" * 25  # width 20: wraps once, position 20 is column 1 of row 2
+        result, output = self._run_with_fake_input(
+            monkeypatch, tmp_path, width=20, renders=[(text, len(text)), (text, 20), (text, 25)]
+        )
+        assert result == text
+        self._assert_columns_in_range(output, width=20)
+
     @staticmethod
     def _assert_columns_in_range(output: str, *, width: int) -> None:
+        # No negative-parameter escape sequences at all (e.g. "\x1b[-1B")
+        # — \d+ below wouldn't match those, silently hiding a row/column
+        # miscalculation instead of catching it.
+        assert "\x1b[-" not in output, "negative row/column offset written"
         columns = [int(n) for n in re.findall(r"\x1b\[(\d+)G", output)]
         assert columns, "expected at least one absolute-column cursor move"
         assert all(1 <= c <= width for c in columns), columns

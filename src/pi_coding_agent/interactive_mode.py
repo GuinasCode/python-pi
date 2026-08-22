@@ -588,12 +588,17 @@ class InteractiveSession:
         terminal does this on its own), and the footer sits immediately
         below it — incrementally patching the screen in place while
         tracking exactly how many rows the wrapped input currently
-        occupies is fragile row-arithmetic that used to corrupt the
+        occupies (and where within them the cursor now sits, since
+        Left/Right/Home/End can put it anywhere in the buffer, not just
+        the end) is fragile row-arithmetic that used to corrupt the
         display (new characters landing on top of already-drawn footer
         text once input grew past one row, since the footer's position
         was computed once up front assuming it never would). A full
-        repaint from a fixed anchor sidesteps needing that arithmetic at
-        all, and a human's typing rate makes it unnoticeable.
+        repaint from a fixed anchor, positioning everything as an
+        explicit (row, column) offset *from that anchor* rather than
+        relative to wherever the cursor happens to currently be, sidesteps
+        needing that arithmetic at all — and a human's typing rate makes
+        the repaint itself unnoticeable.
         """
         w = _console.width
 
@@ -616,46 +621,73 @@ class InteractiveSession:
         prompt = "\033[1m>\033[0m "
         prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
 
-        # Anchor: the still-blank row input is about to start on. _render
-        # always restores to here first, then redraws everything below.
+        def _row_col(pos: int) -> tuple[int, int]:
+            """0-indexed row and 1-indexed column, both relative to the
+            anchor, of the position right after `pos` characters (prompt
+            included) have been laid out at terminal width `w`."""
+            return pos // w, (pos % w) + 1
+
+        # Anchor: the still-blank row input is about to start on. Every
+        # write below is positioned as an explicit offset from here,
+        # restoring to it first — never relative to wherever the cursor
+        # currently is, which is what let the old scheme's assumptions
+        # drift out of sync with reality once input wrapped.
         sys.stdout.write("\x1b7")  # DECSC
         sys.stdout.flush()
 
-        def _render(text: str) -> None:
-            sys.stdout.write("\x1b8")  # DECRC: back to the anchor
-            sys.stdout.write("\x1b[0J")  # wipe any longer previous render
+        # Remembers the last render so land_below_footer (called after
+        # read_line_with_cycle returns/raises, when _edit_loop's buffer is
+        # no longer reachable) can still compute where the footer ended up.
+        last_text = ""
+
+        def _render(text: str, cursor: int) -> None:
+            nonlocal last_text
+            last_text = text
+
+            sys.stdout.write("\x1b8\x1b[0J")  # anchor, wipe any longer previous render
             sys.stdout.write(prompt + text)
+
+            # Row the footer's top (bottom rule) line starts on: right
+            # after the last character, *unless* that character exactly
+            # filled its row (column 1 of the row after it — an empty,
+            # not-yet-used row), in which case the footer starts there
+            # instead of one further down.
+            end_row, end_col = _row_col(prompt_visible_len + len(text))
+            footer_row = end_row if end_col == 1 else end_row + 1
+
+            sys.stdout.write("\x1b8")
+            if footer_row:
+                sys.stdout.write(f"\x1b[{footer_row}B")
+            sys.stdout.write("\r")
             footer_lines = [self._state_line(), self._mode_line()]
             if repo_line:
                 footer_lines.append(repo_line)
             with _console.capture() as capture:
                 _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
-            sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
-            # Back up past the footer to the end of the text just printed
-            # — always the *last* input row, since this editor has no
-            # left/right cursor movement, only append/backspace-from-end.
-            sys.stdout.write(f"\x1b[{footer_rows}A")
-            # Column right after the last character written, on whichever
-            # wrapped row that char landed on. -1/+2 (not +1): CHA columns
-            # are 1-indexed, and this is the column *after* the total-th
-            # char, not the column the char itself is on. min(..., w):
-            # clamps the rare exact-multiple-of-w case (cursor "pending
-            # wrap" at the row boundary) to the last column instead of
-            # requesting a nonexistent column w+1.
-            total = prompt_visible_len + len(text)
-            end_col = min(((total - 1) % w) + 2, w)
-            sys.stdout.write(f"\x1b[{end_col}G")
+            sys.stdout.write(capture.get().replace("\n", "\r\n"))
+
+            cursor_row, cursor_col = _row_col(prompt_visible_len + cursor)
+            sys.stdout.write("\x1b8")
+            if cursor_row:
+                sys.stdout.write(f"\x1b[{cursor_row}B")
+            sys.stdout.write(f"\x1b[{cursor_col}G")
             sys.stdout.flush()
 
         def on_cycle() -> None:
             self._cycle_permission_mode()
 
         def land_below_footer() -> None:
+            end_row, end_col = _row_col(prompt_visible_len + len(last_text))
+            footer_row = end_row if end_col == 1 else end_row + 1
+            landing_row = footer_row + footer_rows
+            sys.stdout.write("\x1b8")
+            if landing_row:
+                sys.stdout.write(f"\x1b[{landing_row}B")
             # A real \r\n for the last step (not another CSI-B) so the
             # terminal scrolls if the footer was sitting at the bottom of
             # the visible viewport — cursor-only movement would just clamp
             # there instead of producing a fresh line to print into.
-            sys.stdout.write(f"\x1b[{footer_rows}B\r\n")
+            sys.stdout.write("\r\n")
             sys.stdout.flush()
 
         try:
