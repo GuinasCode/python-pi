@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from pi_ai import Context, Model, StopReason, TextContent, ThinkingContent, ToolCall, UserMessage
-from pi_ai.providers.nvidia_models import _MODEL_SPECS, AUTO_MODEL_ID, nvidia_models_provider
+from pi_ai.providers.nvidia_models import _MODEL_SPECS, AUTO_MODEL_ID, DEFAULT_MODEL_ID, nvidia_models_provider
 
 
 def _sse(*chunks: dict[str, object]) -> bytes:
@@ -37,14 +37,21 @@ class TestNvidiaModelsProvider:
     def test_registers_every_model_plus_auto(self) -> None:
         _model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
         ids = {m.id for m in models.get_models("nvidia")}
-        for model_id, *_rest in _MODEL_SPECS:
-            assert model_id in ids
+        for spec in _MODEL_SPECS:
+            assert spec.model_id in ids
         assert AUTO_MODEL_ID in ids
         assert len(ids) == len(_MODEL_SPECS) + 1
 
-    def test_returned_model_is_the_auto_fallback_model(self) -> None:
+    def test_returned_model_is_the_configured_default(self) -> None:
         model, _models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        assert model.id == AUTO_MODEL_ID
+        assert model.id == DEFAULT_MODEL_ID == "minimaxai/minimax-m3"
+
+    def test_default_model_is_not_in_the_auto_fallback_chain(self) -> None:
+        """MiniMax M3 is a deliberately different model family from the
+        Nemotron/gpt-oss chain nvidia/auto walks — it's registered and
+        directly selectable, just not part of that fallback sequence."""
+        default_spec = next(spec for spec in _MODEL_SPECS if spec.model_id == DEFAULT_MODEL_ID)
+        assert default_spec.in_fallback_chain is False
 
 
 class TestSingleModelStreaming:
@@ -60,7 +67,7 @@ class TestSingleModelStreaming:
             return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
         _auto, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        target = _MODEL_SPECS[0][0]
+        target = _MODEL_SPECS[0].model_id
         specific = next(m for m in models.get_models("nvidia") if m.id == target)
 
         import pi_ai.providers.nvidia_models as mod
@@ -92,7 +99,7 @@ class TestSingleModelStreaming:
             return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
         _auto, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        target = _MODEL_SPECS[0][0]
+        target = _MODEL_SPECS[0].model_id
         specific = next(m for m in models.get_models("nvidia") if m.id == target)
 
         import pi_ai.providers.nvidia_models as mod
@@ -134,7 +141,7 @@ class TestSingleModelStreaming:
             return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
         _auto, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        target = _MODEL_SPECS[0][0]
+        target = _MODEL_SPECS[0].model_id
         specific = next(m for m in models.get_models("nvidia") if m.id == target)
 
         import pi_ai.providers.nvidia_models as mod
@@ -163,7 +170,7 @@ class TestSingleModelStreaming:
             return httpx.Response(500, content=b"internal error")
 
         _auto, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        target = _MODEL_SPECS[0][0]
+        target = _MODEL_SPECS[0].model_id
         specific = next(m for m in models.get_models("nvidia") if m.id == target)
 
         import pi_ai.providers.nvidia_models as mod
@@ -181,11 +188,95 @@ class TestSingleModelStreaming:
         assert result.model == target
 
 
+class TestPerModelPayload:
+    """Each model's own NVIDIA API example pins a specific top_p, and the
+    Nemotron models need chat_template_kwargs.enable_thinking=True to
+    stream reasoning_content at all — verify the actual request body sent
+    matches, not just that a response comes back."""
+
+    @pytest.mark.asyncio
+    async def test_nemotron_sends_enable_thinking(self) -> None:
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        spec = next(s for s in _MODEL_SPECS if s.enable_thinking)
+        target = next(m for m in models.get_models("nvidia") if m.id == spec.model_id)
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            await models.stream(target, Context(messages=[UserMessage(content="hi")])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        assert captured["top_p"] == spec.top_p
+        assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+        assert captured["temperature"] == 1
+
+    @pytest.mark.asyncio
+    async def test_gpt_oss_does_not_send_enable_thinking(self) -> None:
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        spec = next(s for s in _MODEL_SPECS if s.model_id == "openai/gpt-oss-120b")
+        target = next(m for m in models.get_models("nvidia") if m.id == spec.model_id)
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            await models.stream(target, Context(messages=[UserMessage(content="hi")])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        assert captured["top_p"] == 1.0
+        assert "extra_body" not in captured
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_temperature_overrides_the_default(self) -> None:
+        from pi_ai import SimpleStreamOptions
+
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        target = next(m for m in models.get_models("nvidia") if m.id == _MODEL_SPECS[0].model_id)
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            options = SimpleStreamOptions(temperature=0.2)
+            await models.stream(target, Context(messages=[UserMessage(content="hi")]), options).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        assert captured["temperature"] == 0.2
+
+
 class TestAutoFallbackChain:
     @pytest.mark.asyncio
     async def test_falls_through_to_the_next_model_on_a_non_200(self) -> None:
-        first_id = _MODEL_SPECS[0][0]
-        second_id = _MODEL_SPECS[1][0]
+        first_id = _MODEL_SPECS[0].model_id
+        second_id = _MODEL_SPECS[1].model_id
         good_body = _sse(
             {"choices": [{"delta": {"content": "ok"}}]},
             {"choices": [{"delta": {}, "finish_reason": "stop"}]},
@@ -197,15 +288,15 @@ class TestAutoFallbackChain:
                 return httpx.Response(503, content=b"unavailable")
             return httpx.Response(200, content=good_body, headers={"content-type": "text/event-stream"})
 
-        model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
-        assert model.id == AUTO_MODEL_ID
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        auto = next(m for m in models.get_models("nvidia") if m.id == AUTO_MODEL_ID)
 
         import pi_ai.providers.nvidia_models as mod
 
         original_client = httpx.AsyncClient
         mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
         try:
-            stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
+            stream = models.stream(auto, Context(messages=[UserMessage(content="hi")]))
             result = await stream.result()
         finally:
             mod.httpx.AsyncClient = original_client
@@ -220,29 +311,34 @@ class TestAutoFallbackChain:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500, content=b"down")
 
-        model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        auto = next(m for m in models.get_models("nvidia") if m.id == AUTO_MODEL_ID)
 
         import pi_ai.providers.nvidia_models as mod
 
         original_client = httpx.AsyncClient
         mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
         try:
-            stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
+            stream = models.stream(auto, Context(messages=[UserMessage(content="hi")]))
             result = await stream.result()
         finally:
             mod.httpx.AsyncClient = original_client
 
         assert result.stop_reason == StopReason.ERROR
         assert result.error_message is not None
-        for model_id, *_rest in _MODEL_SPECS:
-            assert model_id in result.error_message
+        for spec in _MODEL_SPECS:
+            if spec.in_fallback_chain:
+                assert spec.model_id in result.error_message
+        # MiniMax isn't part of the chain — it never gets attempted, so it
+        # must not appear in the combined failure summary.
+        assert DEFAULT_MODEL_ID not in result.error_message
 
     @pytest.mark.asyncio
     async def test_does_not_retry_past_a_mid_stream_failure(self) -> None:
         """Once a model's response has already started streaming content
         back, a later failure must not silently fall through to another
         model — the caller may already be showing that partial text."""
-        first_id = _MODEL_SPECS[0][0]
+        first_id = _MODEL_SPECS[0].model_id
         # Malformed SSE stream: starts fine, then the connection is cut
         # off mid-response (no [DONE], body just ends) — httpx surfaces
         # this as a clean end of iteration, not an exception, so this
@@ -254,14 +350,15 @@ class TestAutoFallbackChain:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=partial_body, headers={"content-type": "text/event-stream"})
 
-        model, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        auto = next(m for m in models.get_models("nvidia") if m.id == AUTO_MODEL_ID)
 
         import pi_ai.providers.nvidia_models as mod
 
         original_client = httpx.AsyncClient
         mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
         try:
-            stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
+            stream = models.stream(auto, Context(messages=[UserMessage(content="hi")]))
             result = await stream.result()
         finally:
             mod.httpx.AsyncClient = original_client

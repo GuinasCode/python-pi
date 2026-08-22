@@ -1,18 +1,19 @@
 """NVIDIA-hosted OpenAI-compatible chat models, with an automatic
 fallback chain across several of them.
 
-Registers Nemotron 3 Super/Ultra and gpt-oss 120B/20B (all served from
-the same ``integrate.api.nvidia.com`` OpenAI-compatible endpoint as
-``nvidia_glm.py``'s GLM 5.2 — this module generalizes that file's
-streaming/parsing logic instead of duplicating it once per model id) as
-individually selectable models, plus one extra "auto" model
-(``nvidia/auto``) that tries them in the order below and automatically
-retries the next one on a connection failure or non-2xx status —
-*before* any content has streamed back to the caller. A failure partway
-through an already-started response is reported as a normal error
-instead, never retried: the caller may already be showing that partial
-content, and silently discarding it to start over on a different model
-would be a worse experience than just surfacing the error.
+Registers Nemotron 3 Super/Ultra, gpt-oss 120B/20B, and MiniMax M3 (all
+served from the same ``integrate.api.nvidia.com`` OpenAI-compatible
+endpoint as ``nvidia_glm.py``'s GLM 5.2 — this module generalizes that
+file's streaming/parsing logic instead of duplicating it once per model
+id) as individually selectable models, plus one extra "auto" model
+(``nvidia/auto``) that tries the four largest of them in order and
+automatically retries the next one on a connection failure or non-2xx
+status — *before* any content has streamed back to the caller. A failure
+partway through an already-started response is reported as a normal
+error instead, never retried: the caller may already be showing that
+partial content, and silently discarding it to start over on a
+different model would be a worse experience than just surfacing the
+error.
 
 Usage:
     export NVAPI_KEY=***
@@ -20,16 +21,16 @@ Usage:
     from pi_ai import Model
 
     model, models, meta = nvidia_models_provider(Model(id="test"))
-    # model is nvidia/auto by default — models.get_models("nvidia") lists
-    # every individual model too, selectable directly if a specific one
-    # (not the fallback chain) is wanted.
+    # model is DEFAULT_MODEL_ID (MiniMax M3) by default —
+    # models.get_models("nvidia") lists every other model too (including
+    # nvidia/auto, the fallback chain), individually selectable.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 try:
@@ -63,16 +64,45 @@ from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 AUTO_MODEL_ID = "nvidia/auto"
+DEFAULT_MODEL_ID = "minimaxai/minimax-m3"
 
-# (model_id, display_name, context_window, default_max_tokens) — default
-# max_tokens matches what each model's own NVIDIA API example uses.
-_MODEL_SPECS: list[tuple[str, str, int, int]] = [
-    ("nvidia/nemotron-3-super-120b-a12b", "Nemotron 3 Super 120B", 131072, 16384),
-    ("nvidia/nemotron-3-ultra-550b-a55b", "Nemotron 3 Ultra 550B", 131072, 16384),
-    ("openai/gpt-oss-120b", "GPT-OSS 120B", 131072, 4096),
-    ("openai/gpt-oss-20b", "GPT-OSS 20B", 131072, 4096),
+
+@dataclass(frozen=True)
+class _ModelSpec:
+    model_id: str
+    name: str
+    context_window: int
+    max_tokens: int
+    top_p: float = 0.95
+    # Nemotron's reasoning ("thinking") output is opt-in per NVIDIA's own
+    # examples — off unless this sends chat_template_kwargs.enable_thinking.
+    enable_thinking: bool = False
+    # Included in the fallback chain nvidia/auto walks through.
+    in_fallback_chain: bool = True
+
+
+# default max_tokens/top_p match each model's own NVIDIA API example.
+_MODEL_SPECS: list[_ModelSpec] = [
+    _ModelSpec(
+        "nvidia/nemotron-3-super-120b-a12b",
+        "Nemotron 3 Super 120B",
+        131072,
+        16384,
+        top_p=0.95,
+        enable_thinking=True,
+    ),
+    _ModelSpec(
+        "nvidia/nemotron-3-ultra-550b-a55b",
+        "Nemotron 3 Ultra 550B",
+        131072,
+        16384,
+        top_p=0.95,
+        enable_thinking=True,
+    ),
+    _ModelSpec("openai/gpt-oss-120b", "GPT-OSS 120B", 131072, 4096, top_p=1.0),
+    _ModelSpec("openai/gpt-oss-20b", "GPT-OSS 20B", 131072, 4096, top_p=1.0),
+    _ModelSpec(DEFAULT_MODEL_ID, "MiniMax M3", 8192, 8192, top_p=0.95, in_fallback_chain=False),
 ]
-_MAX_TOKENS_BY_ID = {model_id: max_tokens for model_id, _name, _cw, max_tokens in _MODEL_SPECS}
 
 
 class _UpstreamUnavailable(Exception):
@@ -267,14 +297,13 @@ async def _consume_and_finish(model_id: str, response: Any, stream: AssistantMes
 
 
 async def _stream_one_model(
-    model_id: str,
+    spec: _ModelSpec,
     api_key: str,
     context: Context,
     options: Any | None,
     stream: AssistantMessageEventStream,
-    max_tokens: int,
 ) -> None:
-    """Connect to `model_id` and stream its response into `stream`.
+    """Connect to `spec`'s model and stream its response into `stream`.
 
     Raises _UpstreamUnavailable for a failure before any content reached
     the caller (httpx missing, connection/DNS failure, non-2xx status) —
@@ -286,13 +315,19 @@ async def _stream_one_model(
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload: dict[str, Any] = {
-        "model": model_id,
+        "model": spec.model_id,
         "messages": _openai_messages(context),
-        "max_tokens": options.max_tokens if options and options.max_tokens is not None else max_tokens,
+        "max_tokens": options.max_tokens if options and options.max_tokens is not None else spec.max_tokens,
+        # Every one of these models' own NVIDIA API examples pins
+        # temperature=1 explicitly rather than omitting it — matched here
+        # the same way, only overridden when the caller actually asks for
+        # something else.
+        "temperature": options.temperature if options and options.temperature is not None else 1,
+        "top_p": spec.top_p,
         "stream": True,
     }
-    if options and options.temperature is not None:
-        payload["temperature"] = options.temperature
+    if spec.enable_thinking:
+        payload["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
     if context.tools:
         payload["tools"] = [
             {
@@ -310,12 +345,12 @@ async def _stream_one_model(
             if response.status_code != 200:
                 error_text = await response.aread()
                 raise _UpstreamUnavailable(f"HTTP {response.status_code}: {error_text.decode(errors='replace')}")
-            await _consume_and_finish(model_id, response, stream)
+            await _consume_and_finish(spec.model_id, response, stream)
     except httpx.HTTPError as exc:
         raise _UpstreamUnavailable(str(exc)) from exc
 
 
-def _single_model_stream_fn(model_id: str, api_key: str, max_tokens: int) -> Any:
+def _single_model_stream_fn(spec: _ModelSpec, api_key: str) -> Any:
     """stream_fn for one individually-selected model — no fallback, a
     connection/status failure just becomes a normal terminal error."""
 
@@ -324,9 +359,9 @@ def _single_model_stream_fn(model_id: str, api_key: str, max_tokens: int) -> Any
 
         async def _run() -> None:
             try:
-                await _stream_one_model(model_id, api_key, context, options, stream, max_tokens)
+                await _stream_one_model(spec, api_key, context, options, stream)
             except _UpstreamUnavailable as exc:
-                err = _make_error_message(model_id, str(exc))
+                err = _make_error_message(spec.model_id, str(exc))
                 stream.push(ErrorEvent(reason="error", error=err))
                 stream.end(err)
 
@@ -336,8 +371,8 @@ def _single_model_stream_fn(model_id: str, api_key: str, max_tokens: int) -> Any
     return stream_fn
 
 
-def _fallback_stream_fn(model_ids: Sequence[str], api_key: str) -> Any:
-    """stream_fn for the `nvidia/auto` model — tries each of `model_ids`
+def _fallback_stream_fn(chain: list[_ModelSpec], api_key: str) -> Any:
+    """stream_fn for the `nvidia/auto` model — tries each spec in `chain`
     in order, moving on to the next only on _UpstreamUnavailable (a
     pre-content failure); reports all of them failing as one error."""
 
@@ -346,12 +381,12 @@ def _fallback_stream_fn(model_ids: Sequence[str], api_key: str) -> Any:
 
         async def _run() -> None:
             errors: list[str] = []
-            for model_id in model_ids:
+            for spec in chain:
                 try:
-                    await _stream_one_model(model_id, api_key, context, options, stream, _MAX_TOKENS_BY_ID[model_id])
+                    await _stream_one_model(spec, api_key, context, options, stream)
                     return
                 except _UpstreamUnavailable as exc:
-                    errors.append(f"{model_id}: {exc}")
+                    errors.append(f"{spec.model_id}: {exc}")
                     continue
             summary = "\n".join(errors) if errors else "no models configured"
             err = _make_error_message(AUTO_MODEL_ID, f"All fallback models failed:\n{summary}")
@@ -369,13 +404,14 @@ def nvidia_models_provider(
     api_key: str | None = None,
 ) -> tuple[Model, MutableModels, dict[str, Any]]:
     """Create a models collection with Nemotron 3 Super/Ultra, gpt-oss
-    120B/20B, and an `nvidia/auto` model that tries them in that order
-    with automatic fallback on a pre-content failure.
+    120B/20B, MiniMax M3, and an `nvidia/auto` model that tries the first
+    four (in that order) with automatic fallback on a pre-content
+    failure.
 
-    Returns: (nvidia/auto model, models_collection, {"base_url": ...})
-    — `model` (the first argument) is accepted for symmetry with the
-    other single-model provider factories in this package but otherwise
-    unused; the returned model is always `nvidia/auto`.
+    Returns: (default model, models_collection, {"base_url": ...}) —
+    `model` (the first argument) is accepted for symmetry with the other
+    single-model provider factories in this package but otherwise
+    unused; the returned model is always DEFAULT_MODEL_ID (MiniMax M3).
     """
     import os
 
@@ -385,45 +421,49 @@ def nvidia_models_provider(
 
     models = MutableModels()
     catalog: list[Model] = []
-    provider_models: dict[str, Any] = {}
+    per_model_stream_fns: dict[str, Any] = {}
+    default_model: Model | None = None
 
-    for model_id, name, context_window, max_tokens in _MODEL_SPECS:
+    for spec in _MODEL_SPECS:
         m = Model(
-            id=model_id,
-            name=name,
+            id=spec.model_id,
+            name=spec.name,
             api="openai-completions",
             provider="nvidia",
-            context_window=context_window,
-            max_tokens=max_tokens,
+            context_window=spec.context_window,
+            max_tokens=spec.max_tokens,
         )
         catalog.append(m)
-        provider_models[model_id] = _single_model_stream_fn(model_id, key, max_tokens)
+        per_model_stream_fns[spec.model_id] = _single_model_stream_fn(spec, key)
+        if spec.model_id == DEFAULT_MODEL_ID:
+            default_model = m
 
+    assert default_model is not None, f"{DEFAULT_MODEL_ID!r} must be one of _MODEL_SPECS"
+
+    fallback_chain = [spec for spec in _MODEL_SPECS if spec.in_fallback_chain]
     auto_model = Model(
         id=AUTO_MODEL_ID,
         name="Auto (Nemotron/GPT-OSS fallback chain)",
         api="openai-completions",
         provider="nvidia",
-        context_window=min(cw for _i, _n, cw, _mt in _MODEL_SPECS),
-        max_tokens=max(mt for _i, _n, _cw, mt in _MODEL_SPECS),
+        context_window=min(spec.context_window for spec in fallback_chain),
+        max_tokens=max(spec.max_tokens for spec in fallback_chain),
     )
     catalog.append(auto_model)
-    fallback_chain = [model_id for model_id, _name, _cw, _mt in _MODEL_SPECS]
+    per_model_stream_fns[AUTO_MODEL_ID] = _fallback_stream_fn(fallback_chain, key)
 
     # A single Provider only has one stream_fn, dispatched by the model
     # object passed to it — route by model.id to each model's own
     # pre-built stream_fn instead.
-    per_model_stream_fns = {**provider_models, AUTO_MODEL_ID: _fallback_stream_fn(fallback_chain, key)}
-
     def stream_fn(model_obj: Model, context: Context, options: Any | None = None) -> Any:
         return per_model_stream_fns[model_obj.id](model_obj, context, options)
 
     provider: Provider[Any] = Provider(
         id="nvidia",
-        name="NVIDIA (Nemotron / GPT-OSS)",
+        name="NVIDIA (Nemotron / GPT-OSS / MiniMax)",
         models=catalog,
         stream_fn=stream_fn,
     )
     models.set_provider(provider)
 
-    return auto_model, models, {"base_url": DEFAULT_BASE_URL}
+    return default_model, models, {"base_url": DEFAULT_BASE_URL}

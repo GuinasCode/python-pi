@@ -43,13 +43,16 @@ def _setup_models(args: Args) -> tuple[MutableModels, Any]:
 
     models = MutableModels()
 
-    # Try NVIDIA GLM 5.2 first if NVAPI_KEY is available
+    # Try NVIDIA first if NVAPI_KEY is available — defaults to MiniMax M3,
+    # also registers Nemotron 3 Super/Ultra, gpt-oss 120B/20B, and
+    # nvidia/auto (a fallback chain across those four), all selectable
+    # via /model.
     nvapi_key = args.api_key or os.environ.get("NVAPI_KEY")
     if nvapi_key:
         try:
-            from pi_ai.providers.nvidia_glm import nvidia_glm_provider
+            from pi_ai.providers.nvidia_models import nvidia_models_provider
 
-            model, provider_models, _meta = nvidia_glm_provider(
+            model, provider_models, _meta = nvidia_models_provider(
                 Model(id="test"),
                 api_key=nvapi_key,
             )
