@@ -19,6 +19,7 @@ from typing import Any
 
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from pi_ai import (
     AssistantMessage,
@@ -634,10 +635,27 @@ class InteractiveSession:
         sys.stdout.flush()
 
         repo_line = self._repo_line()
-        footer_rows = 3 + (1 if repo_line else 0)  # bottom rule + state + mode [+ repo]
 
         prompt = "\033[1m>\033[0m "
         prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
+
+        def _line_rows(markup: str) -> int:
+            """How many terminal rows printing one *logical* line of
+            `markup` (rich markup, followed by a newline) actually
+            occupies once the terminal auto-wraps it at width `w` — 1
+            unless its visible (tag-stripped) length exceeds `w`, in
+            which case every extra full width's worth of overflow forces
+            another. state_line in particular (status + provider/model +
+            session id all on one line) routinely runs long enough to
+            wrap on its own once a longer model id is active, and
+            footer_rows treating every footer line as exactly one row
+            regardless used to under-count whenever that happened — the
+            following render's move-up then landed short of the input's
+            actual first row, leaving it only partially cleared and
+            visibly duplicated below the stale remainder.
+            """
+            visible_len = len(Text.from_markup(markup).plain)
+            return max(1, -(-max(visible_len, 1) // w))
 
         def _row_col_after(n: int) -> tuple[int, int]:
             """0-indexed row and 1-indexed column of the position right
@@ -659,9 +677,10 @@ class InteractiveSession:
         # redrawing, then updates it to reflect where it left off.
         last_cursor_row = 0
         last_text = ""
+        last_footer_rows = 0
 
         def _render(text: str, cursor: int, selection: tuple[int, int] | None) -> None:
-            nonlocal last_text, last_cursor_row
+            nonlocal last_text, last_cursor_row, last_footer_rows
             last_text = text
 
             if last_cursor_row:
@@ -692,6 +711,10 @@ class InteractiveSession:
                 _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
             sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
 
+            # 1 row for the rule (always exactly `w` "─" chars) + however
+            # many rows each footer line actually wraps to — not a fixed
+            # count, see _line_rows.
+            footer_rows = 1 + sum(_line_rows(line) for line in footer_lines)
             footer_last_row = input_last_row + footer_rows
             cursor_row, cursor_col = _row_col_after(prompt_visible_len + cursor)
             rows_up = footer_last_row - cursor_row
@@ -701,13 +724,14 @@ class InteractiveSession:
             sys.stdout.flush()
 
             last_cursor_row = cursor_row
+            last_footer_rows = footer_rows
 
         def on_cycle() -> None:
             self._cycle_permission_mode()
 
         def land_below_footer() -> None:
             input_last_row, _ = _row_col_after(prompt_visible_len + len(last_text))
-            footer_last_row = input_last_row + footer_rows
+            footer_last_row = input_last_row + last_footer_rows
             rows_down = footer_last_row - last_cursor_row
             if rows_down:
                 sys.stdout.write(f"\x1b[{rows_down}B")

@@ -691,6 +691,54 @@ class TestFooterDoesNotDuplicate:
         rendered = term.rendered_text()
         assert rendered.count("shift+tab to cycle") == 1, rendered
 
+    def test_footer_does_not_duplicate_when_the_state_line_itself_wraps(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """footer_rows used to be a fixed "rule + state + mode [+ repo]"
+        count (one row per footer *line*), which silently assumed every
+        one of those lines was short enough to fit within the terminal
+        width. state_line (status + provider/model + session id, all on
+        one line) is long enough to wrap on its own once a longer model
+        id is active on a narrower terminal — undercounting footer_rows
+        by however many extra rows that wrap added made every subsequent
+        render's move-up land short of the input's actual first row,
+        clearing only part of the stale previous render and leaving the
+        rest sitting there — visibly duplicated input text, one stale
+        copy per keystroke in the worst case."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        session._model.provider = "nvidia"
+        session._model.id = "minimaxai/minimax-m3"
+        session._session_id = "9f9977bb-aaaa-bbbb-cccc-dddddddddddd"
+        # Narrow enough that "* ready * nvidia/minimaxai/minimax-m3 *
+        # session:9f9977bb" (state_line) wraps to 2 rows on its own.
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=50, force_terminal=True))
+
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any, history: Any = None) -> str:
+            on_render("", 0, None)
+            on_cycle()  # default -> accept edits
+            on_render("", 0, None)
+            on_cycle()  # accept edits -> plan mode (longer label too)
+            on_render("", 0, None)
+            text = ""
+            for ch in "Execute este plano:":
+                text += ch
+                on_render(text, len(text), None)
+            return text
+
+        monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+
+        asyncio.run(session._prompt_input())
+
+        term = _VirtualTerminal()
+        term.feed(fake_stdout.getvalue())
+        rendered = term.rendered_text()
+        assert rendered.count("Execute este plano") == 1, rendered
+
     def test_footer_does_not_duplicate_across_multiple_turns(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
