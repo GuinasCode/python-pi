@@ -394,6 +394,62 @@ class TestEditLoopShiftBackspace:
         assert calls[-1] == ("hi", 0, None)  # Home's render; nothing added after it
 
 
+class TestEditLoopHistory:
+    """Up/Down walk through prior submitted lines, shell-style: Up first
+    saves the in-progress draft, Down past the newest entry restores it."""
+
+    def test_no_history_up_is_a_noop(self) -> None:
+        render, calls = _recorder()
+        result = _edit_loop(_keys(*"hi", _UP, "\n"), render, on_cycle=lambda: None, history=[])
+        assert result == "hi"
+        assert calls[-1] == ("hi", 2, None)  # typing "hi"'s render; Up did nothing
+
+    def test_up_recalls_the_most_recent_entry(self) -> None:
+        render, calls = _recorder()
+        result = _edit_loop(_keys(_UP, "\n"), render, on_cycle=lambda: None, history=["first", "second"])
+        assert result == "second"
+        assert calls[-1] == ("second", 6, None)
+
+    def test_repeated_up_walks_further_back_in_time(self) -> None:
+        render, _ = _recorder()
+        result = _edit_loop(_keys(_UP, _UP, "\n"), render, on_cycle=lambda: None, history=["first", "second"])
+        assert result == "first"
+
+    def test_up_clamps_at_the_oldest_entry(self) -> None:
+        render, _ = _recorder()
+        result = _edit_loop(_keys(_UP, _UP, _UP, "\n"), render, on_cycle=lambda: None, history=["only"])
+        assert result == "only"
+
+    def test_down_after_up_returns_to_a_more_recent_entry(self) -> None:
+        render, _ = _recorder()
+        result = _edit_loop(_keys(_UP, _UP, _DOWN, "\n"), render, on_cycle=lambda: None, history=["first", "second"])
+        assert result == "second"
+
+    def test_down_past_the_newest_entry_restores_the_draft(self) -> None:
+        render, _ = _recorder()
+        result = _edit_loop(_keys(*"draft text", _UP, _DOWN, "\n"), render, on_cycle=lambda: None, history=["old"])
+        assert result == "draft text"
+
+    def test_down_with_no_history_browsing_in_progress_is_a_noop(self) -> None:
+        render, calls = _recorder()
+        result = _edit_loop(_keys(*"hi", _DOWN, "\n"), render, on_cycle=lambda: None, history=["old"])
+        assert result == "hi"
+        assert calls[-1] == ("hi", 2, None)  # typing "hi"'s render; Down did nothing
+
+    def test_recalled_entry_can_be_edited(self) -> None:
+        render, _ = _recorder()
+        result = _edit_loop(_keys(_UP, "\x7f", "\x7f", "\n"), render, on_cycle=lambda: None, history=["hello"])
+        assert result == "hel"
+
+    def test_recalled_entry_clears_any_active_selection(self) -> None:
+        render, calls = _recorder()
+        result = _edit_loop(
+            _keys(*"abc", _SHIFT_LEFT, _SHIFT_LEFT, _UP, "\n"), render, on_cycle=lambda: None, history=["xyz"]
+        )
+        assert result == "xyz"
+        assert calls[-1][2] is None  # no selection carried over into the recalled entry
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="exercises the Windows-only ReadConsoleW-based _read_key")
 class TestWindowsReadKey:
     """These call the real pi_tui.raw_input._read_key — only its two

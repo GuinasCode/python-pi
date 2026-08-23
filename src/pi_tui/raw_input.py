@@ -6,9 +6,10 @@ just treats it as Tab). To let Shift+Tab drive the permission-mode toggle
 (mirroring Claude Code's "shift+tab to cycle" footer) while still typing a
 message, we read raw keys ourselves.
 
-This is deliberately minimal — no history — just enough line editing
-(printable chars, cursor movement, word jump/delete, selection, enter,
-Ctrl+C, Ctrl+D) to replace ``input()``, plus the one extra control key.
+This is deliberately minimal — just enough line editing (printable
+chars, cursor movement, word jump/delete, selection, enter, Ctrl+C,
+Ctrl+D, Up/Down history recall) to replace ``input()``, plus the one
+extra control key.
 When stdin isn't a real TTY (piped input, tests), it falls back to a
 plain ``readline()`` with no cycle detection, matching how ``input()``
 degrades in that situation.
@@ -119,6 +120,7 @@ def _edit_loop(
     read_key: Callable[[], str],
     on_render: Callable[[str, int, tuple[int, int] | None], None],
     on_cycle: Callable[[], None],
+    history: list[str] | None = None,
 ) -> str:
     """Core line-editing loop, decoupled from the platform key source so it
     can be unit-tested with a fake ``read_key``. Terminal writes here are
@@ -140,10 +142,23 @@ def _edit_loop(
     active, typing/Backspace/Delete/Ctrl+Backspace/Shift+Backspace all
     replace/remove the whole selection rather than acting at just the
     cursor — see ``_delete_selection``.
+
+    ``history`` is prior submitted lines, oldest first (the caller's to
+    own/persist — this loop only ever reads it, appending is the
+    caller's job once a line is actually submitted). Up/Down walk
+    backward/forward through it, same convention as a shell: the first
+    Up saves whatever's currently in ``buf`` as an in-progress draft, so
+    Down-ing back past the newest history entry restores it rather than
+    leaving an empty line; Down when not currently browsing history (or
+    with no history at all) does nothing, matching how bash's Down key
+    is a no-op at the bottom rather than clearing the line.
     """
     buf: list[str] = []
     cursor = 0
     anchor: int | None = None
+    history = history if history is not None else []
+    history_index: int | None = None  # None = not browsing; else an index into history
+    draft: str = ""  # buf's content just before the first Up, restored by Down past the end
 
     def _selection() -> tuple[int, int] | None:
         if anchor is None or anchor == cursor:
@@ -288,6 +303,36 @@ def _edit_loop(
         if key == _BACKTAB:
             on_cycle()
             on_render("".join(buf), cursor, _selection())
+            continue
+
+        if key == _UP:
+            if not history:
+                continue
+            if history_index is None:
+                draft = "".join(buf)
+                history_index = len(history) - 1
+            elif history_index > 0:
+                history_index -= 1
+            else:
+                continue
+            buf = list(history[history_index])
+            cursor = len(buf)
+            anchor = None
+            on_render("".join(buf), cursor, None)
+            continue
+
+        if key == _DOWN:
+            if history_index is None:
+                continue
+            if history_index < len(history) - 1:
+                history_index += 1
+                buf = list(history[history_index])
+            else:
+                history_index = None
+                buf = list(draft)
+            cursor = len(buf)
+            anchor = None
+            on_render("".join(buf), cursor, None)
             continue
 
         if not key or key == "\t" or key.startswith("\x1b"):
@@ -439,6 +484,7 @@ def read_line_with_cycle(
     *,
     on_render: Callable[[str, int, tuple[int, int] | None], None],
     on_cycle: Callable[[], None],
+    history: list[str] | None = None,
 ) -> str:
     """Read one line of input, calling ``on_render(current_text,
     cursor_index, selection)`` after every keystroke (initially with
@@ -447,8 +493,10 @@ def read_line_with_cycle(
     and ``on_cycle()`` each time Shift+Tab is pressed (without
     submitting). ``selection`` is a ``(start, end)`` index pair into the
     text when a Shift+arrow selection is active, ``None`` otherwise.
-    Raises ``KeyboardInterrupt`` on Ctrl+C and ``EOFError`` on Ctrl+D at
-    an empty line — same contract as ``input()``.
+    ``history`` (oldest first) is what Up/Down walk through — see
+    ``_edit_loop``'s docstring. Raises ``KeyboardInterrupt`` on Ctrl+C
+    and ``EOFError`` on Ctrl+D at an empty line — same contract as
+    ``input()``.
     """
     if not sys.stdin.isatty():
         # No live rendering possible for piped input — same plain prompt
@@ -462,7 +510,7 @@ def read_line_with_cycle(
 
     on_render("", 0, None)
     with _raw_mode():
-        return _edit_loop(_read_key, on_render, on_cycle)
+        return _edit_loop(_read_key, on_render, on_cycle, history=history)
 
 
 def _select_loop(read_key: Callable[[], str], count: int, on_render: Callable[[int], None], index: int) -> int | None:

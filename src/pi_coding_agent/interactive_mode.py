@@ -263,6 +263,11 @@ class InteractiveSession:
             )
         )
 
+        # Submitted lines (not slash commands — see repl_loop), oldest
+        # first, that Up/Down in the prompt editor walk through. Not
+        # persisted across sessions — a fresh REPL process starts empty.
+        self._prompt_history: list[str] = []
+
         self._session_manager = session_manager
         self._session_id = session_id
         self._message_count = 0
@@ -716,7 +721,9 @@ class InteractiveSession:
         try:
             raw = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: read_line_with_cycle(prompt, on_render=_render, on_cycle=on_cycle),
+                lambda: read_line_with_cycle(
+                    prompt, on_render=_render, on_cycle=on_cycle, history=self._prompt_history
+                ),
             )
         except EOFError:
             land_below_footer()
@@ -765,6 +772,8 @@ class InteractiveSession:
                 break
             if not user_input:  # empty or interrupted
                 continue
+
+            self._prompt_history.append(user_input)
 
             if user_input.startswith("/"):
                 if not await self._handle_command(user_input):

@@ -491,7 +491,7 @@ class TestPromptInputFullRedraw:
         session = _make_session(tmp_path)
         monkeypatch.setattr(interactive_mode, "_console", Console(width=width, force_terminal=True))
 
-        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any, history: Any = None) -> str:
             on_render("", 0, None)
             for text, cursor, selection in triples:
                 on_render(text, cursor, selection)
@@ -673,7 +673,7 @@ class TestFooterDoesNotDuplicate:
         session = _make_session(tmp_path)
         monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
 
-        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any, history: Any = None) -> str:
             on_render("", 0, None)
             for text in ["h", "he", "hel", "hell", "hello", "hello world, this wraps a bit"]:
                 on_render(text, len(text), None)
@@ -703,7 +703,7 @@ class TestFooterDoesNotDuplicate:
         session = _make_session(tmp_path)
         monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
 
-        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any) -> str:
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any, history: Any = None) -> str:
             on_render("", 0, None)
             on_render("hi", 2, None)
             return "hi"
@@ -723,3 +723,52 @@ class TestFooterDoesNotDuplicate:
         term.feed(fake_stdout.getvalue())
         rendered = term.rendered_text()
         assert rendered.count("shift+tab to cycle") == 3, rendered
+
+
+class TestPromptHistory:
+    """Up/Down recalling prior submitted lines (pi_tui.raw_input's own
+    tests cover the actual navigation logic) — here just the REPL-side
+    wiring: _prompt_input passes the running session's history through,
+    and repl_loop actually grows it as lines get submitted."""
+
+    def test_prompt_input_passes_session_history_to_read_line_with_cycle(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        session._prompt_history.extend(["earlier", "later"])
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
+
+        seen_history: list[str] | None = None
+
+        def _fake_read_line_with_cycle(_prompt: str, *, on_render: Any, on_cycle: Any, history: Any = None) -> str:
+            nonlocal seen_history
+            seen_history = history
+            on_render("", 0, None)
+            return ""
+
+        monkeypatch.setattr(interactive_mode, "read_line_with_cycle", _fake_read_line_with_cycle)
+        monkeypatch.setattr("sys.stdout", io.StringIO())
+
+        asyncio.run(session._prompt_input())
+        assert seen_history == ["earlier", "later"]
+        assert seen_history is session._prompt_history  # the live list, not a copy
+
+    def test_repl_loop_appends_submitted_lines_to_history(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        session = _make_session(tmp_path)
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=40, force_terminal=True))
+
+        inputs = iter(["/clear", "hello there", None])
+
+        async def _fake_prompt_input() -> str | None:
+            return next(inputs)
+
+        monkeypatch.setattr(session, "_prompt_input", _fake_prompt_input)
+
+        asyncio.run(session.repl_loop())
+        assert session._prompt_history == ["/clear", "hello there"]
