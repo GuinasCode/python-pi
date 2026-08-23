@@ -50,12 +50,12 @@ from pi_coding_agent.permission_mode import (
 )
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
-from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW
+from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW, PI_THEME
 from pi_memory import MemoryStore
 from pi_tui.raw_input import read_line_with_cycle
 
-_console = Console(highlight=False, soft_wrap=True)
-_err_console = Console(highlight=False, soft_wrap=True, stderr=True)
+_console = Console(highlight=False, soft_wrap=True, theme=PI_THEME)
+_err_console = Console(highlight=False, soft_wrap=True, stderr=True, theme=PI_THEME)
 
 
 # ---------------------------------------------------------------------------

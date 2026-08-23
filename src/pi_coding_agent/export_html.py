@@ -23,7 +23,7 @@ from rich.text import Text
 from pi_coding_agent.diff_render import render_diff
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
 from pi_coding_agent.session_manager import SessionEntry
-from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED
+from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PI_THEME
 
 _HTML_WRAPPER = """\
 <!DOCTYPE html>
@@ -87,7 +87,7 @@ def _render_tool_result_content(data: dict[str, Any]) -> Any:
 
 def render_session_html(entries: list[SessionEntry], *, title: str = "Pi Session") -> str:
     """Render a session's message entries to a self-contained HTML document."""
-    console = Console(record=True, file=io.StringIO(), width=100)
+    console = Console(record=True, file=io.StringIO(), width=100, theme=PI_THEME)
 
     for entry in entries:
         if entry.kind != "message":
