@@ -235,7 +235,7 @@ class TestPerModelPayload:
             mod.httpx.AsyncClient = original_client
 
         assert captured["top_p"] == spec.top_p
-        assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}}
+        assert captured["chat_template_kwargs"] == {"enable_thinking": True}
         assert captured["temperature"] == 1
 
     @pytest.mark.asyncio
@@ -261,7 +261,7 @@ class TestPerModelPayload:
             mod.httpx.AsyncClient = original_client
 
         assert captured["top_p"] == 1.0
-        assert "extra_body" not in captured
+        assert "chat_template_kwargs" not in captured
 
     @pytest.mark.asyncio
     async def test_caller_supplied_temperature_overrides_the_default(self) -> None:
@@ -346,7 +346,7 @@ class TestPerModelPayload:
         assert captured["frequency_penalty"] == 0
         assert captured["presence_penalty"] == 0
         assert captured["top_p"] == 1.0
-        assert "extra_body" not in captured
+        assert "chat_template_kwargs" not in captured
 
     @pytest.mark.asyncio
     async def test_other_models_do_not_send_penalty_params(self) -> None:

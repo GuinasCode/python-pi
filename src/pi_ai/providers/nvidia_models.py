@@ -377,7 +377,13 @@ async def _stream_one_model(
         "stream": True,
     }
     if spec.enable_thinking:
-        payload["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+        # `extra_body` is an OpenAI *Python SDK* convenience that gets
+        # merged into the request body client-side — it isn't a real API
+        # field, so sending it literally (as this did until an actual
+        # HTTP 400 caught it: "Unsupported parameter(s): `extra_body`")
+        # gets rejected. chat_template_kwargs itself is a real top-level
+        # field on NVIDIA's endpoint.
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
     if spec.frequency_penalty is not None:
         payload["frequency_penalty"] = spec.frequency_penalty
     if spec.presence_penalty is not None:
@@ -401,7 +407,14 @@ async def _stream_one_model(
                 raise _UpstreamUnavailable(f"HTTP {response.status_code}: {error_text.decode(errors='replace')}")
             await _consume_and_finish(spec.model_id, response, stream)
     except httpx.HTTPError as exc:
-        raise _UpstreamUnavailable(str(exc)) from exc
+        # describe_exception, not a bare str(exc): connection-level httpx
+        # errors (a dropped connection, a timeout, ...) commonly stringify
+        # to "" — str(exc) alone turned those into a genuinely empty
+        # error_message downstream (e.g. a mid-stream drop while
+        # gemma-4-31b-it was still loading), which every caller then had
+        # to guard against separately instead of getting a real message
+        # once, here.
+        raise _UpstreamUnavailable(describe_exception(exc)) from exc
 
 
 def _single_model_stream_fn(spec: _ModelSpec, api_key: str) -> Any:
