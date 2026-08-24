@@ -129,9 +129,27 @@ def fetch_url(url: str, *, timeout: float = 30.0) -> str:
     return str(call_tool("fetch_url", url=url, timeout=timeout))
 
 
+def browser_snapshot() -> str:
+    """RPC wrapper around the optional execute_code<->browser bridge
+    (spec section 40) — only callable when the parent explicitly wired
+    `pi_runtime.execute_code.browser_bridge.build_browser_bridge_handlers`
+    into this execution's rpc_handlers; otherwise raises RpcCallError
+    with error_type "unknown_tool", same as calling any other
+    non-allowlisted tool."""
+    return str(call_tool("browser_snapshot"))
+
+
+def browser_evaluate(script: str) -> str:
+    """RPC wrapper around the optional execute_code<->browser bridge —
+    see `browser_snapshot`'s docstring for the opt-in requirement."""
+    return str(call_tool("browser_evaluate", script=script))
+
+
 __all__ = [
     "PiToolsUnavailable",
     "RpcCallError",
+    "browser_evaluate",
+    "browser_snapshot",
     "call_tool",
     "fetch_url",
     "list_files",
