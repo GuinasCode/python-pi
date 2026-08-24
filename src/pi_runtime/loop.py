@@ -10,6 +10,7 @@ rules).
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from pi_ai import AssistantMessage, TextContent
 from pi_ai import StopReason as AiStopReason
@@ -175,7 +176,14 @@ class AgentRuntime:
         self._verifier = verifier or Verifier()
         self._replanner = replanner or Replanner()
 
-    async def run(self, goal: Goal, session: AgentSession) -> AgentState:
+    async def run(self, goal: Goal, session: AgentSession, *, telemetry: Any = None) -> AgentState:
+        """*telemetry*, if given, is a pi_runtime.telemetry.
+        TelemetryRecorder — kept untyped here (not imported at module
+        level) to avoid a loop.py<->telemetry.py import cycle (telemetry
+        module doesn't need anything from loop.py either, but keeping
+        this a duck-typed optional avoids ever creating one). Fase 1's
+        own callers (all of them, across every earlier phase) pass
+        nothing and are unaffected."""
         state = AgentState(goal=goal, budget=goal.budget)
         state.status = RunStatus.RUNNING
         state.plan = self._planner.plan(goal)
@@ -226,4 +234,6 @@ class AgentRuntime:
             state.stop_reason = StopReason.COMPLETED
 
         state.finished_at = time.time()
+        if telemetry is not None:
+            telemetry.record_run(state)
         return state

@@ -460,6 +460,19 @@ criterion. A failed run retries by rescheduling (`SCHEDULED`, `next_run_at=now`)
 pending retry — it's already persisted. `cancel()` only affects jobs still pending
 (`SCHEDULED`/`RUNNING`); a job already finished can't be cancelled again.
 
+Fase 15 added `src/pi_runtime/telemetry.py`: `Trace`/`Span`/`CostRecord`/`TelemetryRecorder`.
+Real consumer: `TelemetryRecorder.attach()` hooks into `AgentSession.on_event()` (the existing,
+already-tested event bus — `_emit()`/`on_event()`, unchanged, not a second event system) to
+record real `tool_call` spans from the same `tool_call_start`/`tool_call_end` events
+`interactive_mode._handle_event` already renders; `pi_runtime.loop.AgentRuntime.run()` gained
+an optional `telemetry` parameter (every earlier-phase caller passes nothing and is unaffected
+— verified, all prior tests pass untouched) that records one top-level `agent_run` span with
+the run's `stop_reason`. Every span shares one `Trace`'s `trace_id`; `record_cost()` reuses
+`pi_runtime.router.estimate_cost` (Fase 10, unchanged) rather than a second cost model.
+`to_json()`/`to_dict()` answer plan.md's literal acceptance-criterion questions from one Trace
+— quanto custou, quanto tempo levou, quais tools usou, onde falhou, por que terminou — proven
+end to end in `TestReconstructTheRunFromTelemetry`.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
