@@ -96,6 +96,22 @@ except PiToolsUnavailable:
         assert result.status == ExecutionStatus.SUCCESS
         assert "correctly unavailable" in result.stdout.preview
 
+    def test_script_uses_search_files_and_terminal_over_rpc(self, tmp_path: Path) -> None:
+        (tmp_path / "mod.py").write_text("def target_function():\n    pass\n")
+
+        code = f"""
+from pi_tools import search_files, terminal
+matches = search_files("def target_function", path={str(tmp_path)!r})
+echoed = terminal("echo integration-ok")
+print("matches:", "mod.py" in matches)
+print("echoed:", "integration-ok" in echoed)
+"""
+        result = asyncio.run(_executor(tmp_path).execute(code, rpc_handlers=DEFAULT_HANDLERS, timeout=15))
+        assert result.status == ExecutionStatus.SUCCESS
+        assert "matches: True" in result.stdout.preview
+        assert "echoed: True" in result.stdout.preview
+        assert result.rpc_call_count == 2
+
     def test_only_the_final_print_reaches_the_result_not_intermediate_file_contents(self, tmp_path: Path) -> None:
         """The literal architectural requirement (spec section 7): full
         result -> Python -> filtering -> small result -> model context,

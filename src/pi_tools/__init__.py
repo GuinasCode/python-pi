@@ -96,4 +96,46 @@ def read_file(path: str, *, offset: int = 0, limit: int = 2000) -> str:
     return str(call_tool("read_file", path=path, offset=offset, limit=limit))
 
 
-__all__ = ["PiToolsUnavailable", "RpcCallError", "call_tool", "read_file"]
+def search_files(
+    pattern: str, *, path: str = ".", include: str = "*", ignore_case: bool = False, max_results: int = 50
+) -> str:
+    """RPC wrapper around the parent's `grep` tool."""
+    return str(
+        call_tool(
+            "search_files",
+            pattern=pattern,
+            path=path,
+            include=include,
+            ignore_case=ignore_case,
+            max_results=max_results,
+        )
+    )
+
+
+def list_files(path: str = ".", *, max_depth: int = 3) -> str:
+    """RPC wrapper around the parent's `ls` tool."""
+    return str(call_tool("list_files", path=path, max_depth=max_depth))
+
+
+def terminal(command: str, *, cwd: str | None = None, timeout: int = 60) -> str:
+    """RPC wrapper around the parent's `bash` tool, run foreground and
+    synchronously — the parent caps the timeout regardless of what's
+    requested here (spec section 8: "terminal em modo foreground/seguro")."""
+    return str(call_tool("terminal", command=command, cwd=cwd, timeout=timeout))
+
+
+def fetch_url(url: str, *, timeout: float = 30.0) -> str:
+    """RPC wrapper around the parent's `fetch_url` tool."""
+    return str(call_tool("fetch_url", url=url, timeout=timeout))
+
+
+__all__ = [
+    "PiToolsUnavailable",
+    "RpcCallError",
+    "call_tool",
+    "fetch_url",
+    "list_files",
+    "read_file",
+    "search_files",
+    "terminal",
+]
