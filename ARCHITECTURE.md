@@ -359,6 +359,17 @@ reusing `find_similar` unchanged; secret detection still runs, unchanged. `retri
 wraps `search()` (unchanged, still degrades to lexical without embeddings) with an explicit
 freshness score so a stale match doesn't dominate purely on text relevance.
 
+Fase 8 added `src/pi_runtime/learning.py`: `TrajectoryAnalyzer` (deterministic — structural
+analysis of an `AgentState`, Fase 1, no LLM call), `generate_memory_candidates()` (reuses Fase
+7's cognitive-type vocabulary), and a versioned `SkillRegistry`/`SkillCandidate`. Skill storage
+here is intentionally a small in-memory versioned store, not the full Skills System (loader,
+selector, progressive disclosure, on-disk persistence) — that's Fase 9's job, building on this
+contract. `apply()` only ever appends a new version; `rollback()` appends a copy of an older
+version as the new current one rather than deleting history — "nunca alterar skill
+automaticamente sem diff/avaliação/rollback/provenance" is structural, not conventional:
+`SkillCandidate` always carries a diff and `source_run_id`. `check_regression()` reuses
+`VerificationResult` (Fase 1) again rather than a second verification concept.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
