@@ -14,6 +14,7 @@ import time
 from pi_ai import AssistantMessage, TextContent
 from pi_ai import StopReason as AiStopReason
 from pi_coding_agent.agent_session import AgentSession
+from pi_runtime.context import ContextEngine
 from pi_runtime.state import (
     AgentState,
     Goal,
@@ -53,11 +54,25 @@ class Executor:
     """Runs one PlanStep against a live AgentSession. The actual work
     (streaming, tool calling, steering, memory, soul, subagents) happens
     entirely inside AgentSession, unchanged — this only invokes it and
-    tracks the step's own attempt count."""
+    tracks the step's own attempt count.
 
-    async def execute(self, step: PlanStep, session: AgentSession) -> AssistantMessage:
+    Before each call, the Context Engine (Fase 2) renders whatever
+    protected context (decisions/constraints/evidence/unresolved
+    questions) has accumulated on `state` so far and, if there's
+    anything, queues it as steering context so AgentSession's own
+    compaction can't silently drop it — a run with no accumulated state
+    yet (the common single-turn case) renders nothing and behaves
+    exactly like Fase 1."""
+
+    def __init__(self, *, context_engine: ContextEngine | None = None) -> None:
+        self._context_engine = context_engine or ContextEngine()
+
+    async def execute(self, step: PlanStep, session: AgentSession, state: AgentState) -> AssistantMessage:
         step.attempts += 1
         step.status = StepStatus.RUNNING
+        context_note = self._context_engine.render_working_set_note(state, session.get_messages())
+        if context_note:
+            session.queue_steer_message(context_note)
         result = await session.prompt(step.action)
         step.status = StepStatus.DONE if result.stop_reason != AiStopReason.ERROR else StepStatus.FAILED
         return result
@@ -168,7 +183,7 @@ class AgentRuntime:
             state.budget.record_iteration()
 
             try:
-                result = await self._executor.execute(step, session)
+                result = await self._executor.execute(step, session, state)
             except Exception as exc:
                 state.status = RunStatus.FAILED
                 state.stop_reason = StopReason.ERROR

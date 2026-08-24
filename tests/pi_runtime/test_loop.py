@@ -127,7 +127,7 @@ class TestAgentRuntimeAcceptance:
         out of run() uncaught."""
 
         class _BoomExecutor(Executor):
-            async def execute(self, step: PlanStep, session: AgentSession) -> Any:
+            async def execute(self, step: PlanStep, session: AgentSession, state: Any) -> Any:
                 raise RuntimeError("executor blew up")
 
         session = _make_session([faux_assistant_message("unused")])
@@ -137,6 +137,50 @@ class TestAgentRuntimeAcceptance:
         assert state.status == RunStatus.FAILED
         assert state.stop_reason == StopReason.ERROR
         assert "executor blew up" in (state.error_message or "")
+
+
+class TestContextEngineIntegration:
+    """Executor is the Context Engine's real consumer (plan.md Fase 2) —
+    these confirm decisions/constraints/evidence accumulated on AgentState
+    actually reach the model as steering context, and that a state with
+    nothing accumulated yet behaves exactly like Fase 1 (no injected
+    note)."""
+
+    def test_accumulated_decision_is_surfaced_to_the_next_execute_call(self) -> None:
+        from pi_ai import UserMessage
+        from pi_runtime.state import AgentState
+
+        session = _make_session([faux_assistant_message("ok")])
+        state = AgentState(goal=Goal(objective="x"), decisions=["chose SQLite over Postgres"])
+        step = PlanStep(objective="x", action="continue the task")
+
+        asyncio.run(Executor().execute(step, session, state))
+
+        messages = session.get_messages()
+        decision_messages = [
+            m for m in messages if isinstance(m, UserMessage) and "chose SQLite over Postgres" in str(m.content)
+        ]
+        assert len(decision_messages) == 1
+
+    def test_no_accumulated_state_means_no_injected_note(self) -> None:
+        """Fase 1's own tests already assert this indirectly (no test
+        there populates decisions/constraints/evidence and they all still
+        pass) — this makes the guarantee explicit at the Executor level."""
+        from pi_runtime.state import AgentState
+
+        session = _make_session([faux_assistant_message("ok")])
+        state = AgentState(goal=Goal(objective="x"))
+        step = PlanStep(objective="x", action="do the task")
+
+        asyncio.run(Executor().execute(step, session, state))
+
+        messages = session.get_messages()
+        # exactly one user message: the step's own action text, nothing injected
+        from pi_ai import UserMessage
+
+        user_messages = [m for m in messages if isinstance(m, UserMessage)]
+        assert len(user_messages) == 1
+        assert user_messages[0].content == "do the task"
 
 
 class TestPlannerVerifierReplannerUnits:

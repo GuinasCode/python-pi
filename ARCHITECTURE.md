@@ -275,6 +275,17 @@ wired into the CLI/TUI — later phases (Fase 17) do that once the runtime layer
 See `src/pi_runtime/__init__.py` for the contract summary and `tests/pi_runtime/` for the
 Fase 1 acceptance-criteria tests.
 
+Fase 2 added `src/pi_runtime/context.py` (`ContextItem`, `ContextEngine`): a ranked working
+set (priority/relevance/freshness score) built from `AgentState` + the live conversation,
+replacing "context window as truncation" with selective compaction — goal/constraints/
+decisions/unresolved-questions/evidence are always protected from being dropped; only
+low-ranked conversational filler is trimmed under budget pressure. Its real consumer is
+`pi_runtime.loop.Executor`, which renders a working-set note before each
+`AgentSession.prompt()` call and queues it via the existing `queue_steer_message` hook (Fase
+1) when there's anything to surface — a state with nothing accumulated yet renders nothing,
+so Fase 1's own single-turn behavior is unchanged. `AgentSession` gained a small public
+`get_messages()` accessor for this (previously only reachable via the private `_messages`).
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
