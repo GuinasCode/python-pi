@@ -20,6 +20,7 @@ from pathlib import Path
 
 from pi_runtime.execute_code.capture import BoundedStreamCapture
 from pi_runtime.execute_code.result import ExecuteCodeResult, ExecutionStatus, OutputCapture
+from pi_runtime.execute_code.rpc import RpcHandler, RpcServer
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 
@@ -49,6 +50,8 @@ class CodeExecutor:
         mode: str = "strict",
         cwd: str | None = None,
         env: dict[str, str] | None = None,
+        rpc_handlers: dict[str, RpcHandler] | None = None,
+        max_rpc_calls: int | None = None,
     ) -> ExecuteCodeResult:
         execution_id = uuid.uuid4().hex[:12]
         artifacts_dir = self._artifacts_root / execution_id
@@ -73,7 +76,14 @@ class CodeExecutor:
             )
 
         return await self._run_subprocess(
-            code, timeout=timeout, mode=mode, cwd=cwd, env=env, artifacts_dir=artifacts_dir
+            code,
+            timeout=timeout,
+            mode=mode,
+            cwd=cwd,
+            env=env,
+            artifacts_dir=artifacts_dir,
+            rpc_handlers=rpc_handlers,
+            max_rpc_calls=max_rpc_calls,
         )
 
     async def _run_subprocess(
@@ -85,15 +95,27 @@ class CodeExecutor:
         cwd: str | None,
         env: dict[str, str] | None,
         artifacts_dir: Path,
+        rpc_handlers: dict[str, RpcHandler] | None,
+        max_rpc_calls: int | None,
     ) -> ExecuteCodeResult:
+        import os
         import sys
+
+        rpc_server: RpcServer | None = None
+        child_env = dict(env) if env is not None else dict(os.environ)
+        if rpc_handlers:
+            rpc_server = RpcServer(handlers=rpc_handlers, max_calls=max_rpc_calls)
+            port = await rpc_server.start()
+            child_env["PI_RPC_HOST"] = "127.0.0.1"
+            child_env["PI_RPC_PORT"] = str(port)
+            child_env["PI_RPC_TOKEN"] = rpc_server.token
 
         started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(artifacts_dir / "script.py"),
             cwd=cwd,
-            env=env,
+            env=child_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -115,28 +137,32 @@ class CodeExecutor:
         exit_code: int | None = None
         error_message: str | None = None
         try:
-            await asyncio.wait_for(
-                asyncio.gather(_pump(proc.stdout, stdout_capture), _pump(proc.stderr, stderr_capture), proc.wait()),
-                timeout=timeout,
-            )
-            exit_code = proc.returncode
-            status = ExecutionStatus.SUCCESS if exit_code == 0 else ExecutionStatus.NONZERO_EXIT
-        except TimeoutError:
-            status = ExecutionStatus.TIMEOUT
-            error_message = f"execution exceeded {timeout:.0f}s timeout"
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
-            exit_code = proc.returncode
-        except asyncio.CancelledError:
-            status = ExecutionStatus.CANCELLED
-            proc.kill()
-            with contextlib.suppress(Exception):
-                await proc.wait()
-            raise
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(_pump(proc.stdout, stdout_capture), _pump(proc.stderr, stderr_capture), proc.wait()),
+                    timeout=timeout,
+                )
+                exit_code = proc.returncode
+                status = ExecutionStatus.SUCCESS if exit_code == 0 else ExecutionStatus.NONZERO_EXIT
+            except TimeoutError:
+                status = ExecutionStatus.TIMEOUT
+                error_message = f"execution exceeded {timeout:.0f}s timeout"
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                exit_code = proc.returncode
+            except asyncio.CancelledError:
+                status = ExecutionStatus.CANCELLED
+                proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+                raise
         finally:
             duration_ms = (time.monotonic() - started) * 1000
+            if rpc_server is not None:
+                await rpc_server.close()
 
+        rpc_call_count = len(rpc_server.call_log) if rpc_server is not None else 0
         stdout_result = stdout_capture.finish()
         stderr_result = stderr_capture.finish()
 
@@ -144,6 +170,7 @@ class CodeExecutor:
             status=status,
             exit_code=exit_code,
             duration_ms=duration_ms,
+            rpc_call_count=rpc_call_count,
             stdout=OutputCapture(
                 preview=stdout_result.preview,
                 truncated=stdout_result.truncated,
