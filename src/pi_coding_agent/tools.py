@@ -495,8 +495,7 @@ def browser_fetch_url(url: str, *, timeout: float = 30.0, screenshot: bool = Fal
         if len(screenshot_bytes) > _MAX_IMAGE_BYTES:
             content.append(
                 _text_content(
-                    f"(screenshot omitted: {len(screenshot_bytes)} bytes "
-                    f"exceeds the {_MAX_IMAGE_BYTES}-byte limit)"
+                    f"(screenshot omitted: {len(screenshot_bytes)} bytes exceeds the {_MAX_IMAGE_BYTES}-byte limit)"
                 )
             )
         else:

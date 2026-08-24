@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from pi_memory.embeddings import EMBEDDING_DIM, EmbeddingManager
-from pi_memory.store import SecretDetectedError, MemoryStore, MemoryType, _LEGACY_TYPES, _memories_table_ddl
+from pi_memory.store import _LEGACY_TYPES, MemoryStore, MemoryType, SecretDetectedError, _memories_table_ddl
 
 
 class FakeEmbeddingManager(EmbeddingManager):
@@ -359,9 +359,11 @@ def _make_legacy_db(db_path: Path) -> None:
         "CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN "
         "INSERT INTO memories_fts(rowid, title, content) VALUES (new.id, new.title, new.content); END;"
         "CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN "
-        "INSERT INTO memories_fts(memories_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content); END;"
+        "INSERT INTO memories_fts(memories_fts, rowid, title, content) "
+        "VALUES ('delete', old.id, old.title, old.content); END;"
         "CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN "
-        "INSERT INTO memories_fts(memories_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content); "
+        "INSERT INTO memories_fts(memories_fts, rowid, title, content) "
+        "VALUES ('delete', old.id, old.title, old.content); "
         "INSERT INTO memories_fts(rowid, title, content) VALUES (new.id, new.title, new.content); END;"
     )
     conn.execute(

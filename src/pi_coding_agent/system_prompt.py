@@ -208,8 +208,8 @@ _SOUL_HEADER = (
     "normally just a one-turn deviation: follow the turn's instruction for this "
     "response only, and do not change or re-confirm the principle. Only treat it "
     "as a change to the principle itself when the user's language signals "
-    "permanence (e.g. \"from now on\", \"always\", \"I want this to be a "
-    "permanent rule\") — in that case, propose the update via `remember` "
+    'permanence (e.g. "from now on", "always", "I want this to be a '
+    'permanent rule") — in that case, propose the update via `remember` '
     "(type=soul), which will ask the user to confirm before anything is saved.\n"
 )
 

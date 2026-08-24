@@ -469,18 +469,14 @@ class TestPermissionGate:
         session = _make_session(tmp_path)
         session._permission_mode = session._permission_mode.ACCEPT_EDITS
         with patch("builtins.input", return_value="y") as mock_input:
-            allowed = asyncio.run(
-                session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"})
-            )
+            allowed = asyncio.run(session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"}))
         assert allowed is True
         mock_input.assert_called_once()
 
     def test_remember_soul_honors_rejection(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path)
         with patch("builtins.input", return_value="n"):
-            allowed = asyncio.run(
-                session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"})
-            )
+            allowed = asyncio.run(session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"}))
         assert allowed is False
 
     def test_remember_non_soul_type_unaffected(self, tmp_path: Path) -> None:

@@ -461,6 +461,14 @@ class AgentSession:
         """Names of tools currently registered on this session."""
         return [t.name for t in self._tools]
 
+    def get_messages(self) -> list[Message]:
+        """The conversation so far, in order. A read-only snapshot (the
+        list itself, not a copy — callers must not mutate it) for
+        external code that needs to inspect the transcript without
+        reaching into the private _messages attribute, e.g.
+        pi_runtime.context.ContextEngine building a working set."""
+        return self._messages
+
     def get_subagent_registry(self) -> Any:
         """The live SubagentRegistry backing this session's `subagent` tool
         — None if subagents are disabled (enable_subagents=False) or
@@ -709,9 +717,7 @@ class AgentSession:
         memories = await self._recall_memories(text)
         soul = await self._load_soul()
         system_prompt = self._build_system_prompt(memories, soul)
-        content: str | list[TextContent | ImageContent] = (
-            [TextContent(text=text), *images] if images else text
-        )
+        content: str | list[TextContent | ImageContent] = [TextContent(text=text), *images] if images else text
         user_msg = UserMessage(content=content, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 
