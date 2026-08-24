@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pi_runtime.execute_code.artifacts import apply_output_mode, runs_artifacts_root, write_metadata
 from pi_runtime.execute_code.capture import BoundedStreamCapture
 from pi_runtime.execute_code.result import ExecuteCodeResult, ExecutionStatus, OutputCapture
 from pi_runtime.execute_code.rpc import RpcHandler, RpcServer
@@ -48,8 +49,17 @@ def _validate_syntax(code: str) -> None:
 
 
 class CodeExecutor:
-    def __init__(self, *, artifacts_root: Path | None = None) -> None:
-        self._artifacts_root = artifacts_root or Path(tempfile.gettempdir()) / "pi-execute-code"
+    def __init__(self, *, artifacts_root: Path | None = None, run_id: str | None = None) -> None:
+        # Explicit artifacts_root always wins. Otherwise, a run_id places
+        # artifacts under the spec's own `.pi/runs/<run-id>/execute-code/`
+        # convention (session-inspectable); with neither, a scratch temp
+        # dir (unchanged behavior for callers with no session concept).
+        if artifacts_root is not None:
+            self._artifacts_root = artifacts_root
+        elif run_id is not None:
+            self._artifacts_root = runs_artifacts_root(run_id=run_id)
+        else:
+            self._artifacts_root = Path(tempfile.gettempdir()) / "pi-execute-code"
 
     async def execute(
         self,
@@ -63,6 +73,7 @@ class CodeExecutor:
         max_rpc_calls: int | None = None,
         policy_engine: PolicyEngine | None = None,
         budget: Budget | None = None,
+        output_mode: str = "head_tail",
     ) -> ExecuteCodeResult:
         execution_id = uuid.uuid4().hex[:12]
         artifacts_dir = self._artifacts_root / execution_id
@@ -130,6 +141,7 @@ class CodeExecutor:
             artifacts_dir=artifacts_dir,
             rpc_handlers=effective_handlers,
             max_rpc_calls=max_rpc_calls,
+            output_mode=output_mode,
         )
 
     async def _run_subprocess(
@@ -143,6 +155,7 @@ class CodeExecutor:
         artifacts_dir: Path,
         rpc_handlers: dict[str, RpcHandler] | None,
         max_rpc_calls: int | None,
+        output_mode: str,
     ) -> ExecuteCodeResult:
         import os
         import sys
@@ -226,16 +239,13 @@ class CodeExecutor:
             if rpc_server is not None:
                 await rpc_server.close()
 
-        rpc_call_count = len(rpc_server.call_log) if rpc_server is not None else 0
+        rpc_call_log = list(rpc_server.call_log) if rpc_server is not None else []
+        rpc_call_count = len(rpc_call_log)
         stdout_result = stdout_capture.finish()
         stderr_result = stderr_capture.finish()
 
-        return ExecuteCodeResult(
-            status=status,
-            exit_code=exit_code,
-            duration_ms=duration_ms,
-            rpc_call_count=rpc_call_count,
-            stdout=OutputCapture(
+        stdout_capture_obj = apply_output_mode(
+            OutputCapture(
                 preview=stdout_result.preview,
                 truncated=stdout_result.truncated,
                 total_bytes=stdout_result.total_bytes,
@@ -243,7 +253,10 @@ class CodeExecutor:
                 artifact_path=stdout_result.artifact_path,
                 sha256=stdout_result.sha256,
             ),
-            stderr=OutputCapture(
+            output_mode=output_mode,
+        )
+        stderr_capture_obj = apply_output_mode(
+            OutputCapture(
                 preview=stderr_result.preview,
                 truncated=stderr_result.truncated,
                 total_bytes=stderr_result.total_bytes,
@@ -251,10 +264,22 @@ class CodeExecutor:
                 artifact_path=stderr_result.artifact_path,
                 sha256=stderr_result.sha256,
             ),
+            output_mode=output_mode,
+        )
+
+        result = ExecuteCodeResult(
+            status=status,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            rpc_call_count=rpc_call_count,
+            stdout=stdout_capture_obj,
+            stderr=stderr_capture_obj,
             mode=mode,
             error_message=error_message,
             artifacts_dir=str(artifacts_dir),
         )
+        write_metadata(artifacts_dir, result, rpc_trace=rpc_call_log)
+        return result
 
 
 __all__ = ["CodeExecutor", "InvalidCodeError"]
