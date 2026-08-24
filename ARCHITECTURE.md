@@ -327,6 +327,21 @@ missing Playwright install, a bad URL, an exception Playwright itself raises) ne
 out of `navigate()` — they become `NavigationResult.error`, satisfying "falhas não derrubam
 todo o agente" and "browser deve ser opcional".
 
+Fase 6 added `src/pi_runtime/delegation.py`: `DelegationRequest`/`DelegationOutcome`/
+`DelegationManager`/`aggregate_results`. Does not reimplement subagent process spawning —
+`pi_coding_agent.subagent` already has a real, tested one (`SubagentRegistry`/
+`spawn_subagent`, bounded-concurrency parallel execution, `/agents` list/stop/steer, built
+earlier in this same effort). `DelegationRequest` gives plan.md section 7's exact contract
+(objective/constraints/curated_context/budget/allowed_tools/success_criteria) a structured,
+auditable shape via `render_task()` instead of an ad hoc string assembled per call site;
+`DelegationManager.delegate_parallel()` fans out over the real `spawn_subagent` (each call
+starts its own OS process immediately, so gathering them is genuinely concurrent) with one
+delegation's exception never preventing the others from completing (`asyncio.gather` isn't
+even needed for isolation here — each `delegate()` call already catches its own exception
+into `DelegationOutcome.error`). Token/dollar cost tracking is a registered TODO (Regra
+1.5) — only wall-clock elapsed time is tracked today, since a child process's own usage
+doesn't flow back to the parent yet.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
