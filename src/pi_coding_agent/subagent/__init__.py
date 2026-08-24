@@ -9,6 +9,14 @@ Three modes:
 from __future__ import annotations
 
 from pi_coding_agent.subagent.agent_def import AgentDef, discover_agents
+from pi_coding_agent.subagent.registry import SubagentHandle, SubagentRegistry, SubagentResult
 from pi_coding_agent.subagent.tool import create_subagent_tool
 
-__all__ = ["AgentDef", "create_subagent_tool", "discover_agents"]
+__all__ = [
+    "AgentDef",
+    "SubagentHandle",
+    "SubagentRegistry",
+    "SubagentResult",
+    "create_subagent_tool",
+    "discover_agents",
+]

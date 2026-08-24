@@ -692,6 +692,77 @@ class InteractiveSession:
         if snippet:
             self._output.print(f"      [dim]{escape(snippet)}[/dim]")
 
+    async def _handle_agents_command(self, args_text: str) -> None:
+        """/agents [list|stop|steer] — live view/control of subagent child
+        processes spawned via the `subagent` tool. `list` (default) shows
+        every live child plus recently finished ones. `stop <id-or-prefix>`
+        asks a live child to stop (RPC, honored at its next turn boundary;
+        force-killed if it doesn't within a few seconds — see
+        SubagentHandle.stop). `steer <id-or-prefix> <text>` queues extra
+        guidance for a live child, delivered the same way (next turn
+        boundary, never mid-generation — see AgentSession.queue_steer_message).
+        This is direct, explicit control — unlike the subagent tool itself,
+        which the model calls autonomously, these subcommands only run when
+        you type them."""
+        from pi_coding_agent.subagent.registry import SubagentRegistry
+
+        registry: SubagentRegistry | None = self._agent_session.get_subagent_registry()
+        if registry is None:
+            self._output.print("[dim]subagents are disabled for this session[/dim]")
+            return
+
+        parts = args_text.split(maxsplit=2)
+        sub = parts[0].lower() if parts else "list"
+
+        if sub == "list":
+            handles = registry.list_all()
+            if not handles:
+                self._output.print("[dim]no subagents have run yet.[/dim]")
+                return
+            for h in handles:
+                elapsed = time.time() - h.started_at
+                task_preview = h.task if len(h.task) <= 70 else h.task[:69] + "…"
+                status_color = PASTEL_GREEN if h.status == "running" else DIM_STYLE
+                self._output.print(
+                    f"  [{PASTEL_BLUE}]{h.id}[/{PASTEL_BLUE}]  {escape(h.agent_name)}  "
+                    f"[{status_color}]{h.status}[/{status_color}]  [dim]{elapsed:.0f}s · {escape(task_preview)}[/dim]"
+                )
+            return
+
+        if sub == "stop":
+            ref = parts[1] if len(parts) > 1 else ""
+            if not ref:
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /agents stop <id-or-prefix>")
+                return
+            handle = registry.get(ref)
+            if handle is None:
+                self._output.print(f"[{PASTEL_RED}]no such subagent:[/{PASTEL_RED}] {escape(ref)}")
+                return
+            if handle.status != "running":
+                self._output.print(f"[dim]#{handle.id} already finished ({handle.status})[/dim]")
+                return
+            result = await handle.stop()
+            self._output.print(f"[{PASTEL_GREEN}]stopped[/{PASTEL_GREEN}] #{handle.id} ({result.status})")
+            return
+
+        if sub == "steer":
+            if len(parts) < 3 or not parts[1]:
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /agents steer <id-or-prefix> <text>")
+                return
+            ref, text = parts[1], parts[2]
+            handle = registry.get(ref)
+            if handle is None:
+                self._output.print(f"[{PASTEL_RED}]no such subagent:[/{PASTEL_RED}] {escape(ref)}")
+                return
+            ok = await handle.steer(text)
+            if ok:
+                self._output.print(f"[{PASTEL_GREEN}]steered[/{PASTEL_GREEN}] #{handle.id}")
+            else:
+                self._output.print(f"[dim]#{handle.id} is no longer running — nothing to steer[/dim]")
+            return
+
+        self._output.print(f"[{PASTEL_RED}]unknown /agents subcommand:[/{PASTEL_RED}] {escape(sub)}")
+
     def _restore_persisted_messages(self) -> None:
         if not self._session_manager or not self._session_id:
             return
@@ -889,6 +960,11 @@ class InteractiveSession:
         elif t == "memory_download":
             message = getattr(event, "message", "")
             self._output.print(f"[{DIM_STYLE}]{escape(message)}[/{DIM_STYLE}]")
+
+        elif t == "subagent_progress":
+            text = getattr(event, "text", "")
+            if text:
+                self._output.print(f"[{DIM_STYLE}]  ⤷ {escape(text)}[/{DIM_STYLE}]")
 
         # ── done: flush any remaining text (stream ended without text_end)
         elif t == "done":
@@ -1308,6 +1384,8 @@ class InteractiveSession:
                 f"  [{PASTEL_BLUE}]/extensions[/{PASTEL_BLUE}]  List loaded extensions and load errors\n"
                 f"  [{PASTEL_BLUE}]/soul[/{PASTEL_BLUE}]     Show/manage permanent principles "
                 "(add/edit/remove/clear/audit)\n"
+                f"  [{PASTEL_BLUE}]/agents[/{PASTEL_BLUE}]   List/stop/steer running subagents "
+                "(list / stop <id> / steer <id> <text>)\n"
             )
             return True
 
@@ -1407,6 +1485,11 @@ class InteractiveSession:
         if cmd == "/session" or cmd.startswith("/session "):
             args_text = command[len("/session") :].strip()
             await self._handle_session_command(args_text)
+            return True
+
+        if cmd == "/agents" or cmd.startswith("/agents "):
+            args_text = command[len("/agents") :].strip()
+            await self._handle_agents_command(args_text)
             return True
 
         if cmd == "/soul" or cmd.startswith("/soul "):

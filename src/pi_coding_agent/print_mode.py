@@ -13,6 +13,7 @@ fabricates a plausible-sounding answer instead.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -33,6 +34,8 @@ async def run_print_mode(args: Args) -> int:
 
     if args.mode == "json":
         return await _run_json_mode(args, prompt)
+    if args.mode == "rpc":
+        return await _run_rpc_mode(args, prompt)
     return await _run_text_mode(args, prompt)
 
 
@@ -203,6 +206,103 @@ async def _run_json_mode(args: Args, prompt: str) -> int:
 
     print(json.dumps({"type": "done", "stop_reason": result.stop_reason.value}))
     return 0
+
+
+async def _run_rpc_mode(args: Args, prompt: str) -> int:
+    """RPC mode: the same structured JSON event stream as --mode json, but
+    additionally reads newline-delimited JSON commands from stdin
+    concurrently with the prompt running:
+
+      {"type": "steer", "text": "..."}   queue guidance for the next turn
+      {"type": "stop"}                   abort at the next turn boundary
+
+    This is the child side of pi_coding_agent.subagent.runner's live
+    orchestration: without it, a subagent's parent process can only kill
+    the whole child (an OS-level operation, always available regardless of
+    what's running) — this adds a cooperative channel for steering and a
+    cleaner stop that preserves whatever partial output already happened.
+    A {"type": "ready"} event is emitted before the prompt starts, once
+    the command-reader task is already listening, so the parent knows it's
+    safe to write commands.
+    """
+    models, model = _setup_models(args)
+    if model is None:
+        print(json.dumps({"type": "error", "message": "No model available"}), flush=True)
+        return 1
+
+    session = _build_session(models, model, args)
+
+    def _on_event(event: Any) -> None:
+        event_type = getattr(event, "type", "")
+        if event_type == "start":
+            print(json.dumps({"type": "start"}), flush=True)
+        elif event_type == "text_delta":
+            print(json.dumps({"type": "text_delta", "delta": getattr(event, "delta", "")}), flush=True)
+        elif event_type == "text_end":
+            print(json.dumps({"type": "text_end", "content": getattr(event, "content", "")}), flush=True)
+        elif event_type == "tool_call_start":
+            print(json.dumps({"type": "tool_call_start", "name": getattr(event, "name", "")}), flush=True)
+        elif event_type == "tool_call_end":
+            print(
+                json.dumps(
+                    {
+                        "type": "tool_call_end",
+                        "name": getattr(event, "name", ""),
+                        "is_error": getattr(event, "is_error", False),
+                    }
+                ),
+                flush=True,
+            )
+
+    session.on_event(_on_event)
+
+    stdin_task = asyncio.create_task(_read_rpc_commands(session))
+    print(json.dumps({"type": "ready"}), flush=True)
+    try:
+        result = await session.prompt(prompt)
+    finally:
+        stdin_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stdin_task
+
+    if result.stop_reason == StopReason.ERROR:
+        print(json.dumps({"type": "error", "message": result.error_message or "Unknown error"}), flush=True)
+        return 1
+
+    print(json.dumps({"type": "done", "stop_reason": result.stop_reason.value}), flush=True)
+    return 0
+
+
+async def _read_rpc_commands(session: AgentSession) -> None:
+    """Background task: read stdin lines via a real asyncio StreamReader
+    (not `run_in_executor(None, sys.stdin.readline)` — cancelling a task
+    blocked in an executor thread doesn't actually stop that thread, which
+    left the process hung on exit, unable to close, until the parent's own
+    timeout killed it) and apply steer/stop commands to *session* as they
+    arrive. Returns when stdin is closed (the parent exited or explicitly
+    closed the pipe) — the prompt already running keeps going either way,
+    it just stops being steerable/stoppable from outside."""
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+    while True:
+        raw_line = await reader.readline()
+        if not raw_line:
+            return
+        line = raw_line.decode(errors="replace").strip()
+        if not line:
+            continue
+        try:
+            command = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        command_type = command.get("type")
+        if command_type == "steer":
+            session.queue_steer_message(command.get("text", ""))
+        elif command_type == "stop":
+            session.request_stop()
 
 
 def run_print_mode_sync(args: Args) -> int:

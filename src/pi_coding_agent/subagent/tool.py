@@ -36,7 +36,8 @@ from typing import Any
 from pi_agent_core.types import AgentTool, AgentToolResult
 from pi_ai import TextContent
 from pi_coding_agent.subagent.agent_def import AgentDef, discover_agents
-from pi_coding_agent.subagent.runner import SubagentResult, run_subagent
+from pi_coding_agent.subagent.registry import SubagentRegistry, SubagentResult
+from pi_coding_agent.subagent.runner import spawn_subagent
 
 _PARALLEL_MAX_TASKS = 8
 _PARALLEL_CONCURRENCY = 4
@@ -54,6 +55,7 @@ def _summarize(result: SubagentResult) -> str:
 
 
 async def _run_single(
+    registry: SubagentRegistry,
     agents: dict[str, AgentDef],
     args: dict[str, Any],
     on_progress: Callable[[str], None] | None,
@@ -64,11 +66,13 @@ async def _run_single(
     if agent is None:
         available = ", ".join(agents) if agents else "(none discovered)"
         return _ok(f"Unknown agent: {agent_name!r}. Available: {available}")
-    result = await run_subagent(agent, task, on_progress=on_progress)
+    handle = await spawn_subagent(registry, agent, task, on_progress=on_progress)
+    result = await handle.wait()
     return _ok(_summarize(result))
 
 
 async def _run_parallel(
+    registry: SubagentRegistry,
     agents: dict[str, AgentDef],
     args: dict[str, Any],
     on_progress: Callable[[str], None] | None,
@@ -81,7 +85,8 @@ async def _run_parallel(
         task = spec.get("task", "")
         agent = agents.get(agent_name) or AgentDef(name=agent_name, system_prompt=f"You are {agent_name}.")
         async with sem:
-            return await run_subagent(agent, task, on_progress=on_progress)
+            handle = await spawn_subagent(registry, agent, task, on_progress=on_progress)
+            return await handle.wait()
 
     outcomes = await asyncio.gather(*[_bounded(s) for s in tasks_spec], return_exceptions=True)
 
@@ -96,6 +101,7 @@ async def _run_parallel(
 
 
 async def _run_chain(
+    registry: SubagentRegistry,
     agents: dict[str, AgentDef],
     args: dict[str, Any],
     on_progress: Callable[[str], None] | None,
@@ -117,7 +123,8 @@ async def _run_chain(
             previous_output = err
             continue
 
-        result = await run_subagent(agent, task, on_progress=on_progress)
+        handle = await spawn_subagent(registry, agent, task, on_progress=on_progress)
+        result = await handle.wait()
         summary = _summarize(result)
         parts.append(summary)
         previous_output = result.output.strip()
@@ -130,13 +137,20 @@ def create_subagent_tool(
     cwd: str,
     config_dir: str | None = None,
     on_progress: Callable[[str], None] | None = None,
+    registry: SubagentRegistry | None = None,
 ) -> AgentTool:
     """Return an :class:`AgentTool` that lets the model invoke subagents.
 
     *cwd* and *config_dir* are used to discover agent markdown definitions.
     *on_progress* receives each stdout line from running subagents, useful for
-    streaming live progress to the interactive display.
+    streaming live progress to the interactive display. *registry* — if
+    given, every subagent this tool spawns is tracked in it (live status,
+    stop, steer — see ``pi_coding_agent.subagent.registry``); the caller
+    (AgentSession) owns it and exposes it for commands like ``/agents`` to
+    reach independently of any single tool call. A fresh throwaway
+    registry is created when omitted (e.g. direct construction in tests).
     """
+    registry = registry or SubagentRegistry()
     agents = discover_agents(cwd, config_dir)
     agent_names = list(agents) if agents else []
     agent_list_str = ", ".join(agent_names) if agent_names else "(none discovered — add .pi/agents/<name>.md)"
@@ -209,10 +223,10 @@ def create_subagent_tool(
         update: Any,
     ) -> AgentToolResult:
         if "chain" in args:
-            return await _run_chain(agents, args, on_progress)
+            return await _run_chain(registry, agents, args, on_progress)
         if "tasks" in args:
-            return await _run_parallel(agents, args, on_progress)
-        return await _run_single(agents, args, on_progress)
+            return await _run_parallel(registry, agents, args, on_progress)
+        return await _run_single(registry, agents, args, on_progress)
 
     return AgentTool(
         name="subagent",

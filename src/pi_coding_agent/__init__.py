@@ -5,6 +5,7 @@ Mirrors packages/coding-agent/src/cli/args.ts and packages/coding-agent/src/main
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -304,12 +305,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    from dotenv import load_dotenv
-
     # Load NVAPI_KEY / OPENAI_API_KEY / etc. from a .env file in the cwd (or
     # a parent directory) before anything reads them. Real environment
-    # variables always take precedence (override=False).
-    load_dotenv(override=False)
+    # variables always take precedence (override=False). Skipped when
+    # PI_SKIP_DOTENV is set — every subagent child process is itself a
+    # fresh `pi` invocation that would otherwise redundantly re-parse the
+    # same .env its parent process already resolved; the parent's already-
+    # loaded values are simply inherited via the child's environment
+    # instead. Tests that need a child fully isolated from a real .env
+    # (deterministic faux-provider runs) also rely on this.
+    if not os.environ.get("PI_SKIP_DOTENV"):
+        from dotenv import load_dotenv
+
+        load_dotenv(override=False)
 
     if argv is None:
         argv = sys.argv[1:]

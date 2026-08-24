@@ -16,7 +16,40 @@ from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
 from pi_coding_agent.interactive_mode import InteractiveSession
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
+from pi_coding_agent.subagent.registry import SubagentResult
 from pi_memory.store import MemoryType
+
+
+class _FakeSubagentStdin:
+    def __init__(self) -> None:
+        self.written: list[bytes] = []
+        self._closing = False
+
+    def write(self, data: bytes) -> None:
+        if self._closing:
+            raise BrokenPipeError()
+        self.written.append(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def is_closing(self) -> bool:
+        return self._closing
+
+
+class _FakeSubagentProc:
+    """Bare-minimum stand-in for asyncio.subprocess.Process — enough for
+    SubagentHandle.steer()/stop() to work, without actually driving a
+    process (no _drive task involved in these REPL-command tests)."""
+
+    def __init__(self) -> None:
+        self.stdin = _FakeSubagentStdin()
+
+    def kill(self) -> None:
+        pass
+
+    async def wait(self) -> int:
+        return 0
 
 
 def _make_session(tmp_path: Path) -> InteractiveSession:
@@ -1210,3 +1243,120 @@ class TestSoulAudit:
         with patch("builtins.input", side_effect=[""]):
             asyncio.run(session._handle_command("/soul audit"))
         assert len(store.list_by_type(MemoryType.SOUL)) == 2
+
+
+class TestAgentsCommand:
+    def test_list_with_no_subagents_reports_none_ran(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/agents"))
+        assert any("no subagents have run yet" in p for p in printed)
+
+    def test_list_shows_running_and_finished(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        running = registry.register("scout", "explore the repo", _FakeSubagentProc())
+        finished = registry.register("writer", "write docs", _FakeSubagentProc())
+        finished.mark_done(SubagentResult(output="done!", exit_code=0, agent_name="writer", status="done"))
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/agents list"))
+        assert any(running.id in p for p in printed)
+        assert any(finished.id in p for p in printed)
+        assert any("running" in p for p in printed)
+
+    def test_stop_unknown_id_reports_error(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/agents stop doesnotexist"))
+        assert any("no such subagent" in p for p in printed)
+
+    def test_stop_without_id_shows_usage(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/agents stop"))
+        assert any("usage" in p for p in printed)
+
+    def test_stop_already_finished_agent_is_a_noop(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        handle = registry.register("scout", "task", _FakeSubagentProc())
+        handle.mark_done(SubagentResult(output="x", exit_code=0, agent_name="scout", status="done"))
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command(f"/agents stop {handle.id}"))
+        assert any("already finished" in p for p in printed)
+
+    def test_stop_running_agent_that_acknowledges_quickly(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        handle = registry.register("scout", "task", _FakeSubagentProc())
+
+        async def _ack_soon() -> None:
+            await asyncio.sleep(0.01)
+            handle.mark_done(SubagentResult(output="stopped early", exit_code=0, agent_name="scout", status="killed"))
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+
+        async def _run() -> None:
+            await asyncio.gather(session._handle_command(f"/agents stop {handle.id}"), _ack_soon())
+
+        asyncio.run(_run())
+        assert handle.status == "killed"
+        assert any("stopped" in p for p in printed)
+        # the stop command itself (not just the ack) was actually sent
+        assert handle.proc.stdin.written  # type: ignore[attr-defined]
+
+    def test_steer_unknown_id_reports_error(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/agents steer doesnotexist do the thing"))
+        assert any("no such subagent" in p for p in printed)
+
+    def test_steer_without_text_shows_usage(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        handle = registry.register("scout", "task", _FakeSubagentProc())
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command(f"/agents steer {handle.id}"))
+        assert any("usage" in p for p in printed)
+
+    def test_steer_running_agent_writes_command(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        handle = registry.register("scout", "task", _FakeSubagentProc())
+
+        asyncio.run(session._handle_command(f"/agents steer {handle.id} also check the tests"))
+        written = handle.proc.stdin.written  # type: ignore[attr-defined]
+        assert written
+        assert b"also check the tests" in written[-1]
+
+    def test_steer_finished_agent_is_a_noop(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        registry = session._agent_session.get_subagent_registry()
+        assert registry is not None
+        handle = registry.register("scout", "task", _FakeSubagentProc())
+        handle.mark_done(SubagentResult(output="x", exit_code=0, agent_name="scout", status="done"))
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command(f"/agents steer {handle.id} too late"))
+        assert any("no longer running" in p for p in printed)
+
+    def test_unknown_subcommand_does_not_raise(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        asyncio.run(session._handle_command("/agents bogus"))

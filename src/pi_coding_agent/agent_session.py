@@ -351,6 +351,15 @@ class AgentSession:
         self._interactive = options.interactive
         self._messages: list[Message] = []
         self._event_listeners: list[Callable[[Any], None]] = []
+        # Steer/stop hooks — see queue_steer_message()/request_stop(),
+        # drained at each turn boundary in _run_turns(). Not scoped to a
+        # single prompt() call: a stray message queued between calls is
+        # simply picked up by the next one.
+        self._pending_steer: list[str] = []
+        self._stop_requested = False
+        # Set below, only when enable_subagents actually wires the tool up —
+        # see get_subagent_registry().
+        self._subagent_registry: Any = None
         self._text_buffer = ""
         self._memory_store = options.memory_store
         self._memory_top_k = options.memory_top_k
@@ -380,17 +389,20 @@ class AgentSession:
             ]
         if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
             try:
+                from pi_coding_agent.subagent.registry import SubagentRegistry
                 from pi_coding_agent.subagent.tool import create_subagent_tool
 
                 def _on_subagent_progress(line: str) -> None:
                     self._emit(_SubagentProgressEvent(text=line))
 
+                self._subagent_registry = SubagentRegistry()
                 base_tools = [
                     *base_tools,
                     create_subagent_tool(
                         cwd=self._cwd,
                         config_dir=None,
                         on_progress=_on_subagent_progress,
+                        registry=self._subagent_registry,
                     ),
                 ]
             except Exception:
@@ -421,6 +433,16 @@ class AgentSession:
     def get_active_tool_names(self) -> list[str]:
         """Names of tools currently registered on this session."""
         return [t.name for t in self._tools]
+
+    def get_subagent_registry(self) -> Any:
+        """The live SubagentRegistry backing this session's `subagent` tool
+        — None if subagents are disabled (enable_subagents=False) or
+        weren't wired up. Typed Any rather than SubagentRegistry to avoid
+        importing pi_coding_agent.subagent at module load for sessions
+        that never touch it (see the lazy import above); callers (e.g.
+        interactive_mode's /agents command) import the real type
+        themselves."""
+        return self._subagent_registry
 
     def get_extensions(self) -> LoadExtensionsResult:
         """Result of the most recent extension load — empty when no
@@ -622,6 +644,24 @@ class AgentSession:
         if self._extension_runner is not None:
             await self._extension_runner.emit(event_name, event)
 
+    def queue_steer_message(self, text: str) -> None:
+        """Queue extra guidance to be delivered into the in-flight prompt()
+        call, at the next turn boundary (between tool-call rounds — never
+        mid-generation/mid-tool-call, there's no hook for that with a
+        streaming model response). Delivered as an ordinary UserMessage, so
+        the model sees it exactly like a normal follow-up instruction. A
+        no-op once prompt() has already returned — queue it before the
+        next prompt() call instead."""
+        self._pending_steer.append(text)
+
+    def request_stop(self) -> None:
+        """Ask the in-flight prompt() call to stop at the next turn
+        boundary instead of continuing to the next tool-call round. Whatever
+        partial AssistantMessage/tool results already happened stay in
+        _messages; the call returns a synthetic StopReason.ABORTED
+        message rather than raising."""
+        self._stop_requested = True
+
     async def prompt(self, text: str) -> AssistantMessage:
         """Send a prompt to the model and run the agent loop until completion."""
         if self._extension_runner is not None and not self._session_started:
@@ -644,6 +684,20 @@ class AgentSession:
 
     async def _run_turns(self, system_prompt: str) -> AssistantMessage:
         for turn_index in range(self._max_turns):
+            if self._stop_requested:
+                self._stop_requested = False
+                return AssistantMessage(
+                    content=[TextContent(text="Stopped by request.")],
+                    api=self._model.api,
+                    provider=self._model.provider,
+                    model=self._model.id,
+                    stop_reason=StopReason.ABORTED,
+                    timestamp=int(time.time() * 1000),
+                )
+            while self._pending_steer:
+                steer_text = self._pending_steer.pop(0)
+                self._messages.append(UserMessage(content=steer_text, timestamp=int(time.time() * 1000)))
+
             await self._emit_ext("turn_start", TurnStartEvent(turn=turn_index))
             try:
                 turn_result = await self._run_one_turn(system_prompt)

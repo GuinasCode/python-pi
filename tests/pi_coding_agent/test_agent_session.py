@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from pi_ai import StopReason
+from pi_ai import StopReason, UserMessage
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider, faux_tool_call
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
@@ -525,3 +525,57 @@ class TestBuiltinWebTools:
         assert not result.is_error
         assert result.content[0]["text"] == "rendered"
         assert calls == [("https://example.com", 5)]
+
+
+class TestSteerAndStop:
+    def test_queued_steer_message_is_injected_and_consumed(self) -> None:
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message(
+                    [faux_tool_call("read", {"path": "/nonexistent-steer-test"})], stop_reason=StopReason.TOOL_USE
+                ),
+                faux_assistant_message("done"),
+            ]
+        )
+        session.queue_steer_message("extra guidance")
+        result = asyncio.run(session.prompt("go"))
+
+        assert result is not None
+        assert any(b.type == "text" and b.text == "done" for b in result.content)
+        steer_msgs = [m for m in session._messages if isinstance(m, UserMessage) and m.content == "extra guidance"]
+        assert len(steer_msgs) == 1
+        assert session._pending_steer == []  # drained, not left queued forever
+
+    def test_no_steer_message_is_a_noop(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")])
+        result = asyncio.run(session.prompt("go"))
+        assert result is not None
+        assert not any(isinstance(m, UserMessage) and m.content not in ("go",) for m in session._messages)
+
+    def test_request_stop_short_circuits_before_any_model_call(self) -> None:
+        session, handle = _setup_faux([faux_assistant_message("should not be reached")])
+        session.request_stop()
+        result = asyncio.run(session.prompt("go"))
+
+        assert result is not None
+        assert result.stop_reason == StopReason.ABORTED
+        assert any(b.type == "text" and "Stopped" in b.text for b in result.content)
+        # the queued faux response was never consumed
+        assert not any(
+            b.type == "text" and b.text == "should not be reached"
+            for m in session._messages
+            if hasattr(m, "content")
+            for b in (m.content if isinstance(m.content, list) else [])
+        )
+
+    def test_stop_flag_resets_after_firing(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("first"), faux_assistant_message("second")])
+        session.request_stop()
+        first = asyncio.run(session.prompt("go"))
+        assert first is not None
+        assert first.stop_reason == StopReason.ABORTED
+
+        second = asyncio.run(session.prompt("go again"))
+        assert second is not None
+        assert second.stop_reason == StopReason.STOP
+        assert any(b.type == "text" and b.text == "first" for b in second.content)
