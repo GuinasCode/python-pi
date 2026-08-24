@@ -709,9 +709,7 @@ class AgentSession:
         memories = await self._recall_memories(text)
         soul = await self._load_soul()
         system_prompt = self._build_system_prompt(memories, soul)
-        content: str | list[TextContent | ImageContent] = (
-            [TextContent(text=text), *images] if images else text
-        )
+        content: str | list[TextContent | ImageContent] = [TextContent(text=text), *images] if images else text
         user_msg = UserMessage(content=content, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 

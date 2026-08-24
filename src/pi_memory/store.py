@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from difflib import SequenceMatcher
 import sqlite3
 import time
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -55,7 +55,8 @@ _FTS_TRIGGER_STATEMENTS = [
     "CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN "
     "INSERT INTO memories_fts(rowid, title, content) VALUES (new.id, new.title, new.content); END",
     "CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN "
-    "INSERT INTO memories_fts(memories_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content); END",
+    "INSERT INTO memories_fts(memories_fts, rowid, title, content) "
+    "VALUES ('delete', old.id, old.title, old.content); END",
     "CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN "
     "INSERT INTO memories_fts(memories_fts, rowid, title, content) VALUES ('delete', old.id, old.title, old.content); "
     "INSERT INTO memories_fts(rowid, title, content) VALUES (new.id, new.title, new.content); END",
@@ -82,11 +83,9 @@ def _memories_table_ddl(table_name: str, types: tuple[str, ...]) -> str:
 # lazy-migration path (see MemoryStore._migrate_add_soul_type) only matters
 # for pre-existing databases whose CHECK constraint predates MemoryType.SOUL.
 _SCHEMA = (
-    _memories_table_ddl("memories", _ALL_TYPES)
-    + "\nCREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(\n"
+    _memories_table_ddl("memories", _ALL_TYPES) + "\nCREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(\n"
     "    title, content, content='memories', content_rowid='id'\n"
-    ");\n"
-    + _FTS_TRIGGERS_SQL
+    ");\n" + _FTS_TRIGGERS_SQL
 )
 
 _FTS_CANDIDATES = 10
@@ -107,6 +106,7 @@ _SECRET_PATTERNS = [
 
 def _looks_like_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+
 
 # Ratio threshold for find_overlapping_soul's difflib.SequenceMatcher check.
 # Deliberately more conservative (higher bar) than the embedding-based
@@ -205,9 +205,7 @@ class MemoryStore:
         too expensive to risk paying unconditionally in _init_schema)."""
         if self._soul_supported:
             return
-        row = self._conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'"
-        ).fetchone()
+        row = self._conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
         if row is not None and row["sql"] and "'soul'" in row["sql"]:
             self._soul_supported = True
             return
@@ -260,9 +258,7 @@ class MemoryStore:
         integrity = self._conn.execute("PRAGMA integrity_check").fetchone()[0]
         if integrity != "ok":
             raise RuntimeError(f"soul migration failed integrity_check: {integrity}")
-        row = self._conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'"
-        ).fetchone()
+        row = self._conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
         if row is None or row["sql"] is None or "'soul'" not in row["sql"]:
             raise RuntimeError("soul migration did not produce an updated CHECK constraint")
         if pre_count > 0:
@@ -353,9 +349,7 @@ class MemoryStore:
             return None
         return record, distance
 
-    def find_overlapping_soul(
-        self, content: str, *, exclude_id: int | None = None
-    ) -> list[tuple[MemoryRecord, float]]:
+    def find_overlapping_soul(self, content: str, *, exclude_id: int | None = None) -> list[tuple[MemoryRecord, float]]:
         """Deterministic overlap check among existing Soul principles.
 
         Unlike find_similar, this never depends on sqlite-vec or an
