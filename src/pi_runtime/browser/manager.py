@@ -45,8 +45,11 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pi_runtime.browser.downloads import DownloadResult, save_download
+from pi_runtime.browser.evaluate import EvaluateResult, bound_evaluate_result
 from pi_runtime.browser.interactions import InteractionResult, InteractionStatus, classify_playwright_error
 from pi_runtime.browser.session import BrowserSession
 from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError, capture_snapshot, resolve_locator
@@ -346,6 +349,99 @@ class BrowserManager:
         except Exception as exc:
             return InteractionResult(status=classify_playwright_error(exc), action="wait", error=str(exc))
         return InteractionResult(status=InteractionStatus.SUCCESS, action="wait")
+
+    async def evaluate(
+        self,
+        session_id: str,
+        script: str,
+        *,
+        page_id: str | None = None,
+        timeout: float = 30.0,
+        artifacts_dir: Path | None = None,
+    ) -> EvaluateResult:
+        """Spec section 29: JS evaluation, output-bounded the same way
+        execute_code bounds Python output — a large return value gets a
+        truncated preview plus an artifact pointer, never a raw dump."""
+        import asyncio
+
+        session = self._require_open_session(session_id)
+        page = session.get_page(page_id)
+        if page is None:
+            return EvaluateResult(status=InteractionStatus.NOT_FOUND, preview="", truncated=False, total_chars=0)
+        try:
+            result = await asyncio.wait_for(page.evaluate(script), timeout=timeout)
+        except TimeoutError:
+            return EvaluateResult(
+                status=InteractionStatus.TIMEOUT, preview="", truncated=False, total_chars=0, error="evaluate timed out"
+            )
+        except Exception as exc:
+            return EvaluateResult(
+                status=classify_playwright_error(exc), preview="", truncated=False, total_chars=0, error=str(exc)
+            )
+        return bound_evaluate_result(result, artifacts_dir=artifacts_dir)
+
+    async def upload(self, session_id: str, ref: str, file_paths: list[str]) -> InteractionResult:
+        return await self._run_ref_action(
+            session_id, ref, "upload", lambda locator: locator.set_input_files(file_paths)
+        )
+
+    async def download_via_click(
+        self, session_id: str, ref: str, *, artifacts_dir: Path, timeout: float = 30.0
+    ) -> DownloadResult:
+        """Spec section 31: clicking `ref` is expected to trigger a
+        browser download — waits for it and saves it as a real artifact
+        with provenance (path/filename/mime/size/sha256), rather than
+        trusting anything the page claims about the file."""
+        session = self._require_open_session(session_id)
+        page = session.get_page()
+        if page is None:
+            return DownloadResult(ok=False, error="no active page")
+        try:
+            locator = self.resolve_ref(session_id, ref)
+        except (StaleRefError, ValueError) as exc:
+            return DownloadResult(ok=False, error=str(exc))
+
+        try:
+            async with page.expect_download(timeout=timeout * 1000) as download_info:
+                await locator.click()
+            download = await download_info.value
+        except Exception as exc:
+            return DownloadResult(ok=False, error=str(exc))
+
+        return await save_download(download, artifacts_dir=artifacts_dir)
+
+    def list_pages(self, session_id: str) -> list[dict[str, str | bool]]:
+        session = self._require_open_session(session_id)
+        return [
+            {"page_id": page_id, "url": page.url, "active": page_id == session.active_page_id}
+            for page_id, page in session.pages.items()
+        ]
+
+    async def new_page(self, session_id: str, *, url: str | None = None) -> str:
+        session = self._require_open_session(session_id)
+        page = await session.context.new_page()
+        page_id = session.add_page(page, make_active=True)
+        if url is not None:
+            await page.goto(url)
+        session.touch()
+        return page_id
+
+    def switch_page(self, session_id: str, page_id: str) -> bool:
+        session = self._require_open_session(session_id)
+        if page_id not in session.pages:
+            return False
+        session.active_page_id = page_id
+        session.touch()
+        return True
+
+    async def close_page(self, session_id: str, page_id: str) -> bool:
+        session = self._require_open_session(session_id)
+        page = session.pages.get(page_id)
+        if page is None:
+            return False
+        await page.close()
+        session.remove_page(page_id)
+        return True
 
 
 async def _page_to_evidence(page: Any, requested_url: str) -> Evidence:

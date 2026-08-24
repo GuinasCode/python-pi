@@ -33,6 +33,7 @@ _PAGES: dict[str, bytes] = {
   ">Submit</button>
 </form>
 <div id="result"></div>
+<a id="download-link" href="/download" download="fixture.txt">Download</a>
 </body></html>
 """,
     "/dynamic": b"""
