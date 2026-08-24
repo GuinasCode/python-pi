@@ -1,0 +1,13 @@
+"""pi_runtime.browser — persistent Playwright browser harness (GAP B).
+
+Replaces the previous one-shot browser_fetch_url wrapper: sessions here
+hold a real Playwright BrowserContext/Page across multiple tool calls
+(spec section 21) instead of opening and closing a browser per call.
+"""
+
+from __future__ import annotations
+
+from pi_runtime.browser.manager import BrowserManager, NavigationResult
+from pi_runtime.browser.session import BrowserSession
+
+__all__ = ["BrowserManager", "BrowserSession", "NavigationResult"]
