@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from rich.text import Text
 
 from pi_ai import (
     AssistantMessage,
+    ImageContent,
     Message,
     Model,
     StopReason,
@@ -36,6 +38,7 @@ from pi_ai import (
 from pi_ai.models import MutableModels, Provider
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions
+from pi_coding_agent.attachments import load_attachment
 from pi_coding_agent.config import ensure_config_dir, ensure_session_dir, get_config_dir, get_session_dir
 from pi_coding_agent.diff_render import render_diff
 from pi_coding_agent.extension_ui import ExtensionUIContext, NoopExtensionUIContext
@@ -58,6 +61,9 @@ from pi_tui.raw_input import read_line_with_cycle
 
 _console = Console(highlight=False, soft_wrap=True, theme=PI_THEME)
 _err_console = Console(highlight=False, soft_wrap=True, stderr=True, theme=PI_THEME)
+
+# `@path` inline attachment tokens in a typed prompt — see run_turn().
+_ATTACHMENT_RE = re.compile(r"@(\S+)")
 
 
 # ---------------------------------------------------------------------------
@@ -773,7 +779,17 @@ class InteractiveSession:
             data = entry.data
             role = data.get("role", "user")
             if role == "user":
-                msg: Message = UserMessage(content=data.get("content", ""), timestamp=data.get("timestamp", 0))
+                raw_content = data.get("content", "")
+                if isinstance(raw_content, list):
+                    user_blocks: list[TextContent | ImageContent] = []
+                    for b in raw_content:
+                        if b.get("type") == "text":
+                            user_blocks.append(TextContent(text=b.get("text", "")))
+                        elif b.get("type") == "image":
+                            user_blocks.append(ImageContent(data=b.get("data", ""), mime_type=b.get("mime_type", "")))
+                    msg: Message = UserMessage(content=user_blocks, timestamp=data.get("timestamp", 0))
+                else:
+                    msg = UserMessage(content=raw_content, timestamp=data.get("timestamp", 0))
             elif role == "assistant":
                 content_blocks: list[TextContent | ThinkingContent | ToolCall] = []
                 for b in data.get("content", []):
@@ -803,9 +819,13 @@ class InteractiveSession:
             if isinstance(content, str):
                 data["content"] = content
             elif isinstance(content, list):
-                data["content"] = [
-                    {"type": b.type, "text": b.text} if isinstance(b, TextContent) else str(b) for b in content
-                ]
+
+                def _user_block_to_dict(b: TextContent | ImageContent) -> dict[str, Any]:
+                    if isinstance(b, TextContent):
+                        return {"type": b.type, "text": b.text}
+                    return {"type": b.type, "data": b.data, "mime_type": b.mime_type}
+
+                data["content"] = [_user_block_to_dict(b) for b in content]
         elif isinstance(message, AssistantMessage):
 
             def _block_to_dict(b: TextContent | ThinkingContent | ToolCall) -> dict[str, Any]:
@@ -824,10 +844,15 @@ class InteractiveSession:
             data["tool_call_id"] = message.tool_call_id
             data["tool_name"] = message.tool_name
             data["is_error"] = message.is_error
-            data["content"] = [
-                {"type": b.type, "text": b.text} if isinstance(b, TextContent) else {"type": b.type}
-                for b in message.content
-            ]
+
+            def _tool_block_to_dict(b: TextContent | ImageContent) -> dict[str, Any]:
+                if isinstance(b, TextContent):
+                    return {"type": b.type, "text": b.text}
+                if isinstance(b, ImageContent):
+                    return {"type": b.type, "data": b.data, "mime_type": b.mime_type}
+                return {"type": getattr(b, "type", "unknown")}
+
+            data["content"] = [_tool_block_to_dict(b) for b in message.content]
             if message.details is not None:
                 data["details"] = message.details
 
@@ -986,15 +1011,45 @@ class InteractiveSession:
             self._on_status_change()
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
-        """Run a single conversation turn."""
-        user_msg = UserMessage(content=user_input, timestamp=int(time.time() * 1000))
-        self._persist_message(user_msg)
+        """Run a single conversation turn.
+
+        `@path` tokens in `user_input` are resolved as attachments (same
+        mechanism as print mode's `@file` CLI args — see
+        pi_coding_agent.attachments): an image becomes a content block
+        sent alongside the text; anything else is read as text and folded
+        into the prompt actually sent to the model. Only real, existing
+        paths are treated as attachments — `@handle`-looking text that
+        doesn't resolve to a file is left alone, so this can't misfire on
+        an unrelated `@` in the message."""
+        prompt_text = user_input
+        images: list[ImageContent] = []
+        for match in _ATTACHMENT_RE.finditer(user_input):
+            # Strip trailing punctuation a sentence would naturally have
+            # right after the path ("@screenshot.png?", "@log.txt.") —
+            # without this, \S+ swallows it into the path and the
+            # existence check below always fails.
+            candidate = match.group(1).rstrip(".,!?;:'\")]}")
+            if not candidate or not Path(candidate).exists():
+                continue
+            attachment = load_attachment(candidate)
+            if attachment.error:
+                self._output.print(f"[{PASTEL_RED}]attachment error:[/{PASTEL_RED}] {escape(attachment.error)}")
+                continue
+            if attachment.image:
+                images.append(attachment.image)
+            elif attachment.text_block:
+                prompt_text = f"{prompt_text}\n\n{attachment.text_block}"
+
+        persisted_content: str | list[TextContent | ImageContent] = (
+            [TextContent(text=user_input), *images] if images else user_input
+        )
+        self._persist_message(UserMessage(content=persisted_content, timestamp=int(time.time() * 1000)))
 
         self._turn_has_text = False
         self._thinking_open = False
         unsub = self._agent_session.on_event(self._handle_event)
         try:
-            result = await self._agent_session.prompt(user_input)
+            result = await self._agent_session.prompt(prompt_text, images=images or None)
         except Exception as exc:
             self._output.print(f"\n[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(str(exc))}")
             return None

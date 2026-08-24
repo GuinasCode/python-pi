@@ -12,7 +12,17 @@ import json
 import httpx
 import pytest
 
-from pi_ai import Context, ImageContent, Model, StopReason, TextContent, ThinkingContent, ToolCall, UserMessage
+from pi_ai import (
+    Context,
+    ImageContent,
+    Model,
+    StopReason,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResultMessage,
+    UserMessage,
+)
 from pi_ai.providers.nvidia_models import _MODEL_SPECS, AUTO_MODEL_ID, DEFAULT_MODEL_ID, nvidia_models_provider
 
 
@@ -321,6 +331,43 @@ class TestPerModelPayload:
             {"type": "text", "text": "What is in this image?"},
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Zm9v"}},
         ]
+
+    @pytest.mark.asyncio
+    async def test_tool_result_with_image_adds_a_synthetic_user_message(self) -> None:
+        """A ToolResultMessage carrying an image (e.g. a browser
+        screenshot) used to be silently dropped — the tool role message
+        can only carry text per the OpenAI-compatible wire format, so the
+        image now rides along as a synthetic follow-up user message."""
+        _default, models, _meta = nvidia_models_provider(Model(id="test"), api_key="test-key")
+        target = next(m for m in models.get_models("nvidia") if m.id == "google/gemma-4-31b-it")
+
+        body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        captured: dict[str, object] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+        import pi_ai.providers.nvidia_models as mod
+
+        original_client = httpx.AsyncClient
+        mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        try:
+            tool_result = ToolResultMessage(
+                tool_call_id="call_1",
+                tool_name="screenshot",
+                content=[TextContent(text="captured"), ImageContent(data="abc", mime_type="image/png")],
+            )
+            await models.stream(target, Context(messages=[UserMessage(content="hi"), tool_result])).result()
+        finally:
+            mod.httpx.AsyncClient = original_client
+
+        sent_messages = captured["messages"]  # type: ignore[index]
+        assert sent_messages[1] == {"role": "tool", "tool_call_id": "call_1", "content": "captured"}
+        assert sent_messages[2] == {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}],
+        }
 
     @pytest.mark.asyncio
     async def test_llama_vision_sends_its_penalty_params(self) -> None:

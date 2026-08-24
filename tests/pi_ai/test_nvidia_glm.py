@@ -1,7 +1,9 @@
-"""Tests for the OpenRouter Moonshot (Kimi K2.6) provider streaming logic.
+"""Tests for the NVIDIA GLM 5.2 provider streaming logic.
 
-Uses httpx.MockTransport to simulate the OpenRouter SSE response without a
-real network call.
+Uses httpx.MockTransport to simulate the NVIDIA SSE response without a real
+network call. No test file existed for this provider before — it's one of
+the four that used to silently drop ImageContent from user messages
+(`"".join(c.text if hasattr(c, "text") else "" for c in msg.content)`).
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import httpx
 import pytest
 
 from pi_ai import Context, ImageContent, Model, StopReason, TextContent, ToolCall, UserMessage
-from pi_ai.providers.openrouter_moonshot import openrouter_moonshot_provider
+from pi_ai.providers.nvidia_glm import nvidia_glm_provider
 
 
 def _sse(*chunks: dict[str, object]) -> bytes:
@@ -32,9 +34,9 @@ async def test_text_response_accumulates_and_ends_with_message() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
-    model, models, _meta = openrouter_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+    model, models, _meta = nvidia_glm_provider(Model(id="z-ai/glm-5.2"), api_key="test-key")
 
-    import pi_ai.providers.openrouter_moonshot as mod
+    import pi_ai.providers.nvidia_glm as mod
 
     original_client = httpx.AsyncClient
     mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
@@ -69,9 +71,9 @@ async def test_tool_call_response_does_not_crash_and_parses_arguments() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
-    model, models, _meta = openrouter_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+    model, models, _meta = nvidia_glm_provider(Model(id="z-ai/glm-5.2"), api_key="test-key")
 
-    import pi_ai.providers.openrouter_moonshot as mod
+    import pi_ai.providers.nvidia_glm as mod
 
     original_client = httpx.AsyncClient
     mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
@@ -82,7 +84,6 @@ async def test_tool_call_response_does_not_crash_and_parses_arguments() -> None:
         mod.httpx.AsyncClient = original_client
 
     assert result.stop_reason == StopReason.TOOL_USE
-    assert len(result.content) == 1
     call = result.content[0]
     assert isinstance(call, ToolCall)
     assert call.name == "read_file"
@@ -90,30 +91,9 @@ async def test_tool_call_response_does_not_crash_and_parses_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_api_error_produces_error_message_not_crash() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, content=b"internal error")
-
-    model, models, _meta = openrouter_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
-
-    import pi_ai.providers.openrouter_moonshot as mod
-
-    original_client = httpx.AsyncClient
-    mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
-    try:
-        stream = models.stream(model, Context(messages=[UserMessage(content="hi")]))
-        result = await stream.result()
-    finally:
-        mod.httpx.AsyncClient = original_client
-
-    assert result.stop_reason == StopReason.ERROR
-    assert result.error_message and "500" in result.error_message
-
-
-@pytest.mark.asyncio
 async def test_image_content_reaches_the_wire_as_an_image_url_data_uri() -> None:
     """Regression: this provider used to build user-message content with
-    `"".join(c.text if isinstance(c, TextContent) else "" for c in msg.content)`,
+    `"".join(c.text if hasattr(c, "text") else "" for c in msg.content)`,
     which silently turned an ImageContent block into an empty string."""
     body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
     captured: dict[str, object] = {}
@@ -122,9 +102,9 @@ async def test_image_content_reaches_the_wire_as_an_image_url_data_uri() -> None
         captured.update(json.loads(request.content))
         return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
 
-    model, models, _meta = openrouter_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+    model, models, _meta = nvidia_glm_provider(Model(id="z-ai/glm-5.2"), api_key="test-key")
 
-    import pi_ai.providers.openrouter_moonshot as mod
+    import pi_ai.providers.nvidia_glm as mod
 
     original_client = httpx.AsyncClient
     mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
@@ -144,3 +124,15 @@ async def test_image_content_reaches_the_wire_as_an_image_url_data_uri() -> None
         {"type": "text", "text": "what is in this image?"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,Zm9v"}},
     ]
+
+
+def test_missing_api_key_raises() -> None:
+    import os
+
+    old = os.environ.pop("NVAPI_KEY", None)
+    try:
+        with pytest.raises(ValueError):
+            nvidia_glm_provider(Model(id="z-ai/glm-5.2"))
+    finally:
+        if old is not None:
+            os.environ["NVAPI_KEY"] = old

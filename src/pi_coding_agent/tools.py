@@ -5,8 +5,10 @@ Mirrors packages/coding-agent/src/core/tools/.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import html
+import mimetypes
 import os
 import re
 import subprocess
@@ -27,6 +29,10 @@ except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
 
 _MAX_FETCH_CHARS = 50_000
+# Generous but bounded — an image this large would blow well past most
+# providers' request-body limits anyway; better to fail with a clear
+# message here than send it and get an opaque 413 from the API.
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass
@@ -41,6 +47,10 @@ class ToolResult:
 
 def _text_content(text: str) -> dict[str, str]:
     return {"type": "text", "text": text}
+
+
+def _image_content(data: bytes, mime_type: str) -> dict[str, str]:
+    return {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime_type}
 
 
 # --- Bash tool ---
@@ -99,6 +109,28 @@ def execute_bash(
 # --- Read tool ---
 
 
+def _read_image_file(file_path: Path, mime_type: str) -> ToolResult:
+    """Read an image file as base64-encoded ImageContent rather than
+    forcing it through read_text (which corrupts binary data — every byte
+    outside valid UTF-8 becomes a replacement character, i.e. garbage)."""
+    try:
+        data = file_path.read_bytes()
+    except Exception as exc:
+        return ToolResult(
+            content=[_text_content(f"Error reading file: {exc}")],
+            is_error=True,
+        )
+    if len(data) > _MAX_IMAGE_BYTES:
+        return ToolResult(
+            content=[_text_content(f"Image too large to read ({len(data)} bytes, max {_MAX_IMAGE_BYTES})")],
+            is_error=True,
+        )
+    return ToolResult(
+        content=[_image_content(data, mime_type)],
+        details={"mimeType": mime_type, "sizeBytes": len(data)},
+    )
+
+
 def read_file(
     path: str | Path,
     *,
@@ -120,6 +152,11 @@ def read_file(
             content=[_text_content(f"Not a file: {path}")],
             is_error=True,
         )
+
+    mime_type, _ = mimetypes.guess_type(str(file_path))
+    if mime_type and mime_type.startswith("image/"):
+        return _read_image_file(file_path, mime_type)
+
     try:
         text = file_path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
@@ -404,7 +441,7 @@ def fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
 # --- Browser tool (optional: requires the `browser` extra) ---
 
 
-def browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+def browser_fetch_url(url: str, *, timeout: float = 30.0, screenshot: bool = False) -> ToolResult:
     """Load a URL in a real headless browser and return the rendered
     page's visible text — for JavaScript-rendered pages `fetch_url` can't
     read. Requires Playwright (``pip install 'python-pi[browser]'`` plus
@@ -412,6 +449,12 @@ def browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
     error result rather than raising if it isn't installed, so the model
     can fall back to `fetch_url` or tell the user instead of the turn
     just failing.
+
+    *screenshot* — also capture a full-page PNG and return it as an extra
+    image content block, for actually *seeing* the page (layout, images,
+    visual rendering issues) rather than only its extracted text. Off by
+    default: it roughly doubles the round trip (an extra render pass) and
+    most callers only want the text.
     """
     if not _PLAYWRIGHT_AVAILABLE:
         return ToolResult(
@@ -433,6 +476,7 @@ def browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
                 page.goto(url, timeout=timeout * 1000, wait_until="networkidle")
                 title = page.title()
                 text = page.inner_text("body")
+                screenshot_bytes = page.screenshot(type="png", full_page=True) if screenshot else None
             finally:
                 browser.close()
     except Exception as exc:
@@ -445,7 +489,21 @@ def browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
     if truncated:
         output += f"\n\n... (truncated at {_MAX_FETCH_CHARS} characters)"
 
+    content: list[dict[str, str]] = [_text_content(output)]
+    has_screenshot = False
+    if screenshot_bytes is not None:
+        if len(screenshot_bytes) > _MAX_IMAGE_BYTES:
+            content.append(
+                _text_content(
+                    f"(screenshot omitted: {len(screenshot_bytes)} bytes "
+                    f"exceeds the {_MAX_IMAGE_BYTES}-byte limit)"
+                )
+            )
+        else:
+            content.append(_image_content(screenshot_bytes, "image/png"))
+            has_screenshot = True
+
     return ToolResult(
-        content=[_text_content(output)],
-        details={"url": url, "title": title},
+        content=content,
+        details={"url": url, "title": title, "screenshot": has_screenshot},
     )

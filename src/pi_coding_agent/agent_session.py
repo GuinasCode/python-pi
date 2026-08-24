@@ -105,6 +105,25 @@ class _SubagentProgressEvent:
     text: str = ""
 
 
+def _tool_result_blocks_to_content(raw: list[dict[str, Any]]) -> list[TextContent | ImageContent]:
+    """Convert a tool's raw content dicts (``{"type": "text", "text": ...}``
+    / ``{"type": "image", "data": ..., "mime_type": ...}`` — see
+    pi_coding_agent.tools.ToolResult) into typed content blocks.
+
+    This used to only keep ``type == "text"`` blocks, silently dropping
+    any image a tool returned (e.g. an image the `read` tool loaded, or a
+    browser screenshot) before it ever reached a provider."""
+    content: list[TextContent | ImageContent] = []
+    for b in raw:
+        if b.get("type") == "text":
+            content.append(TextContent(text=b.get("text", "")))
+        elif b.get("type") == "image":
+            content.append(ImageContent(data=b.get("data", ""), mime_type=b.get("mime_type", "")))
+    if not content:
+        content = [TextContent(text="")]
+    return content
+
+
 def _create_tool_result_message(
     tool_call: ToolCall,
     result: ToolResult,
@@ -112,11 +131,7 @@ def _create_tool_result_message(
 ) -> ToolResultMessage:
     """Create a ToolResultMessage from a ToolResult."""
     raw = result.content if result.content else [{"type": "text", "text": ""}]
-    content: list[TextContent | ImageContent] = [
-        TextContent(text=b.get("text", "")) for b in raw if b.get("type") == "text"
-    ]
-    if not content:
-        content = [TextContent(text="")]
+    content: list[TextContent | ImageContent] = _tool_result_blocks_to_content(raw)
     return ToolResultMessage(
         tool_call_id=tool_call.id,
         tool_name=tool_call.name,
@@ -144,7 +159,10 @@ def get_builtin_tools() -> list[Tool]:
         ),
         Tool(
             name="read",
-            description="Read a file and return its contents with line numbers.",
+            description=(
+                "Read a file and return its contents with line numbers. "
+                "An image file (png/jpg/gif/webp/...) is returned as an image instead, for visual analysis."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -228,13 +246,20 @@ def get_builtin_tools() -> list[Tool]:
                 "Load a URL in a real headless browser and return the rendered page's visible "
                 "text. Slower than `webfetch` — prefer that first, and use this one for pages "
                 "whose content only appears after JavaScript runs (a near-empty `webfetch` "
-                "result despite a 200 status is the usual sign)."
+                "result despite a 200 status is the usual sign). Set `screenshot: true` to also "
+                "get a full-page PNG screenshot for visual analysis (layout, images, rendering "
+                "issues) — text extraction alone can't see any of that."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "The URL to open"},
                     "timeout": {"type": "number", "description": "Timeout in seconds", "default": 30},
+                    "screenshot": {
+                        "type": "boolean",
+                        "description": "Also capture a full-page PNG screenshot",
+                        "default": False,
+                    },
                 },
                 "required": ["url"],
             },
@@ -279,7 +304,9 @@ def _execute_tool(name: str, args: dict[str, Any]) -> ToolResult:
     if name == "webfetch":
         return fetch_url(args.get("url", ""), timeout=args.get("timeout", 30))
     if name == "browser":
-        return browser_fetch_url(args.get("url", ""), timeout=args.get("timeout", 30))
+        return browser_fetch_url(
+            args.get("url", ""), timeout=args.get("timeout", 30), screenshot=args.get("screenshot", False)
+        )
     return ToolResult(
         content=[{"type": "text", "text": f"Unknown tool: {name}"}],
         is_error=True,
@@ -662,8 +689,17 @@ class AgentSession:
         message rather than raising."""
         self._stop_requested = True
 
-    async def prompt(self, text: str) -> AssistantMessage:
-        """Send a prompt to the model and run the agent loop until completion."""
+    async def prompt(self, text: str, *, images: list[ImageContent] | None = None) -> AssistantMessage:
+        """Send a prompt to the model and run the agent loop until completion.
+
+        *images* — if given, the message sent to the model carries `text`
+        plus each image as separate content blocks (an OpenAI-compatible
+        provider turns that into text + image_url parts; see
+        pi_ai.providers._openai_compat.user_content_to_openai). Memory
+        recall still runs against the plain text only — searching FTS/
+        embeddings with image bytes makes no sense and no provider here
+        does image-based retrieval anyway.
+        """
         if self._extension_runner is not None and not self._session_started:
             # Fired lazily on first use rather than in __init__, which is
             # synchronous while extension handlers are async.
@@ -673,7 +709,10 @@ class AgentSession:
         memories = await self._recall_memories(text)
         soul = await self._load_soul()
         system_prompt = self._build_system_prompt(memories, soul)
-        user_msg = UserMessage(content=text, timestamp=int(time.time() * 1000))
+        content: str | list[TextContent | ImageContent] = (
+            [TextContent(text=text), *images] if images else text
+        )
+        user_msg = UserMessage(content=content, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 
         await self._emit_ext("agent_start", AgentStartEvent())
@@ -794,9 +833,7 @@ class AgentSession:
             return
 
         result, is_error, details = await self._execute_tool_call(tool_call)
-        tool_content: list[TextContent | ImageContent] = [
-            TextContent(text=b.get("text", "")) for b in result if b.get("type") == "text"
-        ]
+        tool_content: list[TextContent | ImageContent] = _tool_result_blocks_to_content(result)
 
         if self._extension_runner is not None:
             result_event = ToolResultEvent(

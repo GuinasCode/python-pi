@@ -12,7 +12,7 @@ import json
 import httpx
 import pytest
 
-from pi_ai import Context, Model, StopReason, TextContent, ToolCall, UserMessage
+from pi_ai import Context, ImageContent, Model, StopReason, TextContent, ToolCall, UserMessage
 from pi_ai.providers.nvidia_moonshot import nvidia_moonshot_provider
 
 
@@ -109,3 +109,39 @@ async def test_api_error_produces_error_message_not_crash() -> None:
 
     assert result.stop_reason == StopReason.ERROR
     assert result.error_message and "500" in result.error_message
+
+
+@pytest.mark.asyncio
+async def test_image_content_reaches_the_wire_as_an_image_url_data_uri() -> None:
+    """Regression: this provider used to build user-message content with
+    `"".join(c.text if isinstance(c, TextContent) else "" for c in msg.content)`,
+    which silently turned an ImageContent block into an empty string."""
+    body = _sse({"choices": [{"delta": {"content": "ok"}}]}, {"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    model, models, _meta = nvidia_moonshot_provider(Model(id="moonshotai/kimi-k2.6"), api_key="test-key")
+
+    import pi_ai.providers.nvidia_moonshot as mod
+
+    original_client = httpx.AsyncClient
+    mod.httpx.AsyncClient = lambda **kw: original_client(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+    try:
+        message = UserMessage(
+            content=[
+                TextContent(text="what is in this image?"),
+                ImageContent(data="Zm9v", mime_type="image/png"),
+            ]
+        )
+        await models.stream(model, Context(messages=[message])).result()
+    finally:
+        mod.httpx.AsyncClient = original_client
+
+    sent_content = captured["messages"][0]["content"]  # type: ignore[index]
+    assert sent_content == [
+        {"type": "text", "text": "what is in this image?"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,Zm9v"}},
+    ]

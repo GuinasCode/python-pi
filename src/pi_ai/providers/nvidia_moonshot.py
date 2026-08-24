@@ -41,6 +41,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
+from pi_ai.providers._openai_compat import tool_result_to_openai_messages, user_content_to_openai
 from pi_ai.utils import describe_exception, spawn_background_task
 
 NIGHTLY_API = "openai"  # Uses OpenAI-compatible API format
@@ -109,12 +110,7 @@ def _convert_messages(context: Context) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if isinstance(msg, UserMessage):
-            content = (
-                msg.content
-                if isinstance(msg.content, str)
-                else "".join(c.text if isinstance(c, TextContent) else "" for c in msg.content)
-            )
-            messages.append({"role": "user", "content": content})
+            messages.append({"role": "user", "content": user_content_to_openai(msg.content)})
         elif isinstance(msg, AssistantMessage):
             text_parts: list[str] = []
             tool_calls_out: list[dict[str, Any]] = []
@@ -134,8 +130,7 @@ def _convert_messages(context: Context) -> list[dict[str, Any]]:
                 openai_msg["tool_calls"] = tool_calls_out
             messages.append(openai_msg)
         elif isinstance(msg, ToolResultMessage):
-            result_text = "\n".join(b.text for b in msg.content if isinstance(b, TextContent))
-            messages.append({"role": "tool", "tool_call_id": msg.tool_call_id, "content": result_text})
+            messages.extend(tool_result_to_openai_messages(msg))
 
     if context.system_prompt:
         messages.insert(0, {"role": "system", "content": context.system_prompt})

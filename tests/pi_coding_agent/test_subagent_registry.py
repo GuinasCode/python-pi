@@ -69,7 +69,7 @@ class FakeStream:
         self._on_exhausted = on_exhausted
         self._fired = False
 
-    def __aiter__(self) -> "FakeStream":
+    def __aiter__(self) -> FakeStream:
         return self
 
     def _fire_exhausted(self) -> None:

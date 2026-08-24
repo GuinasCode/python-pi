@@ -77,6 +77,52 @@ class TestReadFile:
         lines = result.content[0]["text"].split("\n")
         assert len(lines) == 5
 
+    def test_read_image_returns_image_content_not_garbled_text(self, tmp_path: Path) -> None:
+        # A minimal, valid 1x1 PNG.
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+            b"\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb0"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        file_path = tmp_path / "pixel.png"
+        file_path.write_bytes(png_bytes)
+
+        result = read_file(file_path)
+        assert not result.is_error
+        assert result.content[0]["type"] == "image"
+        assert result.content[0]["mime_type"] == "image/png"
+
+        import base64
+
+        assert base64.b64decode(result.content[0]["data"]) == png_bytes
+
+    def test_read_oversized_image_is_an_error(self, tmp_path: Path) -> None:
+        import pi_coding_agent.tools as tools_module
+
+        file_path = tmp_path / "huge.png"
+        file_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+        original_max = tools_module._MAX_IMAGE_BYTES
+        tools_module._MAX_IMAGE_BYTES = 10
+        try:
+            result = read_file(file_path)
+        finally:
+            tools_module._MAX_IMAGE_BYTES = original_max
+
+        assert result.is_error
+        assert "too large" in result.content[0]["text"]
+
+    def test_read_non_image_binary_extension_is_not_misdetected(self, tmp_path: Path) -> None:
+        """A .txt file must never be routed through the image path even
+        if it happens to contain non-UTF-8 bytes — mimetypes.guess_type
+        goes by extension, not content sniffing, so this is really just
+        confirming the .txt case stays on the text path."""
+        file_path = tmp_path / "plain.txt"
+        file_path.write_text("hello")
+        result = read_file(file_path)
+        assert not result.is_error
+        assert result.content[0]["type"] == "text"
+
 
 class TestWriteFile:
     def test_write_new_file(self, tmp_path: Path) -> None:
@@ -257,3 +303,115 @@ class TestBrowserFetchUrl:
         result = browser_fetch_url("https://example.com")
         assert not result.is_error
         assert "Example Domain" in result.content[0]["text"]
+
+
+class _FakePage:
+    def __init__(self, text: str, screenshot_bytes: bytes) -> None:
+        self._text = text
+        self._screenshot_bytes = screenshot_bytes
+        self.screenshot_calls = 0
+
+    def goto(self, url: str, timeout: float | None = None, wait_until: str | None = None) -> None:
+        return None
+
+    def title(self) -> str:
+        return "Fake Title"
+
+    def inner_text(self, selector: str) -> str:
+        return self._text
+
+    def screenshot(self, type: str | None = None, full_page: bool | None = None) -> bytes:
+        self.screenshot_calls += 1
+        return self._screenshot_bytes
+
+
+class _FakeBrowser:
+    def __init__(self, page: _FakePage) -> None:
+        self._page = page
+        self.closed = False
+
+    def new_page(self) -> _FakePage:
+        return self._page
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeChromium:
+    def __init__(self, browser: _FakeBrowser) -> None:
+        self._browser = browser
+
+    def launch(self) -> _FakeBrowser:
+        return self._browser
+
+
+class _FakePlaywright:
+    def __init__(self, browser: _FakeBrowser) -> None:
+        self.chromium = _FakeChromium(browser)
+
+
+class _FakeSyncPlaywrightCtx:
+    def __init__(self, browser: _FakeBrowser) -> None:
+        self._browser = browser
+
+    def __enter__(self) -> _FakePlaywright:
+        return _FakePlaywright(self._browser)
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+class TestBrowserFetchUrlScreenshot:
+    """Uses a fake Playwright (matching its sync API surface — chromium.
+    launch() -> browser.new_page() -> page.goto/title/inner_text/
+    screenshot, browser.close()) so these run without a real browser or
+    network call, unlike the one real-network test above."""
+
+    def test_screenshot_true_adds_an_image_content_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_coding_agent.tools as tools_module
+
+        page = _FakePage("page text", b"\x89PNG\r\n\x1a\nfakepngbytes")
+        browser = _FakeBrowser(page)
+        monkeypatch.setattr(tools_module, "_PLAYWRIGHT_AVAILABLE", True)
+        monkeypatch.setattr(tools_module, "sync_playwright", lambda: _FakeSyncPlaywrightCtx(browser), raising=False)
+
+        result = browser_fetch_url("https://example.com", screenshot=True)
+        assert not result.is_error
+        assert len(result.content) == 2
+        assert result.content[0]["type"] == "text"
+        assert result.content[1]["type"] == "image"
+        assert result.content[1]["mime_type"] == "image/png"
+        assert result.details["screenshot"] is True
+        assert page.screenshot_calls == 1
+        assert browser.closed is True
+
+    def test_screenshot_false_by_default_no_image_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_coding_agent.tools as tools_module
+
+        page = _FakePage("page text", b"should never be captured")
+        browser = _FakeBrowser(page)
+        monkeypatch.setattr(tools_module, "_PLAYWRIGHT_AVAILABLE", True)
+        monkeypatch.setattr(tools_module, "sync_playwright", lambda: _FakeSyncPlaywrightCtx(browser), raising=False)
+
+        result = browser_fetch_url("https://example.com")
+        assert not result.is_error
+        assert len(result.content) == 1
+        assert result.content[0]["type"] == "text"
+        assert page.screenshot_calls == 0
+        assert result.details["screenshot"] is False
+
+    def test_oversized_screenshot_is_omitted_with_a_note(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import pi_coding_agent.tools as tools_module
+
+        page = _FakePage("page text", b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+        browser = _FakeBrowser(page)
+        monkeypatch.setattr(tools_module, "_PLAYWRIGHT_AVAILABLE", True)
+        monkeypatch.setattr(tools_module, "sync_playwright", lambda: _FakeSyncPlaywrightCtx(browser), raising=False)
+        monkeypatch.setattr(tools_module, "_MAX_IMAGE_BYTES", 10)
+
+        result = browser_fetch_url("https://example.com", screenshot=True)
+        assert not result.is_error
+        assert len(result.content) == 2
+        assert result.content[1]["type"] == "text"
+        assert "too large" in result.content[1]["text"] or "omitted" in result.content[1]["text"]
+        assert result.details["screenshot"] is False

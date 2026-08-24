@@ -19,24 +19,49 @@ import os
 import sys
 from typing import Any
 
-from pi_ai import Model, StopReason
+from pi_ai import ImageContent, Model, StopReason
 from pi_ai.models import MutableModels
 from pi_coding_agent import Args
 from pi_coding_agent.agent_session import AgentSession, AgentSessionOptions, get_builtin_tools
+from pi_coding_agent.attachments import load_attachment
+
+
+def _resolve_prompt_and_attachments(args: Args) -> tuple[str, list[ImageContent]] | None:
+    """Combine the positional prompt words with `@path` attachments
+    (Args.file_args — parsed since day one, never consumed until now).
+    An image attachment becomes an ImageContent block; anything else is
+    read as text and folded into the prompt. Returns None (caller prints
+    the "no prompt" error) only when there's neither prompt text nor any
+    successfully resolved attachment."""
+    prompt = " ".join(args.messages) if args.messages else ""
+    images: list[ImageContent] = []
+    for path in args.file_args:
+        attachment = load_attachment(path)
+        if attachment.error:
+            print(f"Error: {attachment.error}", file=sys.stderr)
+            return None
+        if attachment.image:
+            images.append(attachment.image)
+        elif attachment.text_block:
+            prompt = f"{prompt}\n\n{attachment.text_block}" if prompt else attachment.text_block
+    if not prompt and not images:
+        return None
+    return prompt, images
 
 
 async def run_print_mode(args: Args) -> int:
     """Run Pi in print mode: execute a single prompt and print the result."""
-    prompt = " ".join(args.messages) if args.messages else ""
-    if not prompt:
+    resolved = _resolve_prompt_and_attachments(args)
+    if resolved is None:
         print("Error: No prompt provided", file=sys.stderr)
         return 1
+    prompt, images = resolved
 
     if args.mode == "json":
-        return await _run_json_mode(args, prompt)
+        return await _run_json_mode(args, prompt, images)
     if args.mode == "rpc":
-        return await _run_rpc_mode(args, prompt)
-    return await _run_text_mode(args, prompt)
+        return await _run_rpc_mode(args, prompt, images)
+    return await _run_text_mode(args, prompt, images)
 
 
 def _setup_models(args: Args) -> tuple[MutableModels, Any]:
@@ -130,7 +155,7 @@ def _build_session(models: MutableModels, model: Any, args: Args) -> AgentSessio
     )
 
 
-async def _run_text_mode(args: Args, prompt: str) -> int:
+async def _run_text_mode(args: Args, prompt: str, images: list[ImageContent] | None = None) -> int:
     """Run in text print mode: run the agent loop and print the result."""
     print(f"[pi] {prompt}", file=sys.stderr)
 
@@ -156,7 +181,7 @@ async def _run_text_mode(args: Args, prompt: str) -> int:
             print(f"[pi] tool error: {getattr(event, 'result_text', '')}", file=sys.stderr)
 
     session.on_event(_on_event)
-    result = await session.prompt(prompt)
+    result = await session.prompt(prompt, images=images)
 
     if printed_any:
         print()
@@ -167,7 +192,7 @@ async def _run_text_mode(args: Args, prompt: str) -> int:
     return 0
 
 
-async def _run_json_mode(args: Args, prompt: str) -> int:
+async def _run_json_mode(args: Args, prompt: str, images: list[ImageContent] | None = None) -> int:
     """Run in JSON event stream mode."""
     models, model = _setup_models(args)
     if model is None:
@@ -198,7 +223,7 @@ async def _run_json_mode(args: Args, prompt: str) -> int:
             )
 
     session.on_event(_on_event)
-    result = await session.prompt(prompt)
+    result = await session.prompt(prompt, images=images)
 
     if result.stop_reason == StopReason.ERROR:
         print(json.dumps({"type": "error", "message": result.error_message or "Unknown error"}))
@@ -208,7 +233,7 @@ async def _run_json_mode(args: Args, prompt: str) -> int:
     return 0
 
 
-async def _run_rpc_mode(args: Args, prompt: str) -> int:
+async def _run_rpc_mode(args: Args, prompt: str, images: list[ImageContent] | None = None) -> int:
     """RPC mode: the same structured JSON event stream as --mode json, but
     additionally reads newline-delimited JSON commands from stdin
     concurrently with the prompt running:
@@ -259,7 +284,7 @@ async def _run_rpc_mode(args: Args, prompt: str) -> int:
     stdin_task = asyncio.create_task(_read_rpc_commands(session))
     print(json.dumps({"type": "ready"}), flush=True)
     try:
-        result = await session.prompt(prompt)
+        result = await session.prompt(prompt, images=images)
     finally:
         stdin_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

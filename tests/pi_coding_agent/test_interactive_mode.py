@@ -78,6 +78,104 @@ def test_interactive_run_turn(tmp_path: Path) -> None:
     assert any(block.type == "text" and "interactive" in block.text for block in result.content)
 
 
+class TestRunTurnAttachments:
+    def test_image_attachment_is_passed_to_agent_session_prompt(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        image_path = tmp_path / "photo.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakebytes")
+
+        captured: dict[str, object] = {}
+        original_prompt = session._agent_session.prompt
+
+        async def _spy_prompt(text: str, *, images: object = None) -> object:
+            captured["text"] = text
+            captured["images"] = images
+            return await original_prompt(text, images=images)
+
+        session._agent_session.prompt = _spy_prompt  # type: ignore[method-assign]
+        asyncio.run(session.run_turn(f"what is in @{image_path}?"))
+
+        assert captured["images"] is not None
+        images = captured["images"]
+        assert len(images) == 1  # type: ignore[arg-type]
+        assert images[0].mime_type == "image/png"  # type: ignore[index]
+
+    def test_persisted_message_includes_image_content(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        image_path = tmp_path / "photo.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\nfakebytes")
+
+        asyncio.run(session.run_turn(f"describe @{image_path}"))
+
+        entries = session._session_manager.get_entries(session._session_id)  # type: ignore[union-attr,arg-type]
+        first = entries[0]
+        assert first.data["role"] == "user"
+        assert isinstance(first.data["content"], list)
+        assert any(b.get("type") == "image" for b in first.data["content"])
+
+    def test_text_file_attachment_is_folded_into_the_prompt(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        notes_path = tmp_path / "notes.txt"
+        notes_path.write_text("the crucial detail")
+
+        captured: dict[str, object] = {}
+        original_prompt = session._agent_session.prompt
+
+        async def _spy_prompt(text: str, *, images: object = None) -> object:
+            captured["text"] = text
+            return await original_prompt(text, images=images)
+
+        session._agent_session.prompt = _spy_prompt  # type: ignore[method-assign]
+        asyncio.run(session.run_turn(f"summarize @{notes_path}"))
+
+        assert "the crucial detail" in captured["text"]  # type: ignore[operator]
+
+    def test_nonexistent_at_token_is_left_alone_not_treated_as_attachment(self, tmp_path: Path) -> None:
+        """`@handle`-looking text that isn't a real path must not error or
+        be stripped — only tokens that actually resolve to a file count as
+        attachments."""
+        session = _make_session(tmp_path)
+        captured: dict[str, object] = {}
+        original_prompt = session._agent_session.prompt
+
+        async def _spy_prompt(text: str, *, images: object = None) -> object:
+            captured["text"] = text
+            captured["images"] = images
+            return await original_prompt(text, images=images)
+
+        session._agent_session.prompt = _spy_prompt  # type: ignore[method-assign]
+        asyncio.run(session.run_turn("cc @someone about this"))
+
+        assert captured["text"] == "cc @someone about this"
+        assert captured["images"] is None
+
+    def test_nonexistent_path_is_silently_left_as_plain_text(self, tmp_path: Path) -> None:
+        """A `@path` that doesn't resolve to any real file is treated as
+        ordinary text, not an attachment error — only a token that passes
+        Path.exists() is even handed to load_attachment()."""
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+
+        result = asyncio.run(session.run_turn(f"look at @{tmp_path / 'nonexistent.png'}"))
+        assert result is not None
+        assert not any("attachment error" in p for p in printed)
+
+    def test_attachment_that_exists_but_errors_reports_and_continues(self, tmp_path: Path) -> None:
+        """A directory passes Path.exists() but load_attachment() still
+        rejects it ("not a file") — that error must surface, and the turn
+        must still complete instead of crashing."""
+        session = _make_session(tmp_path)
+        a_dir = tmp_path / "a_directory"
+        a_dir.mkdir()
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+
+        result = asyncio.run(session.run_turn(f"look at @{a_dir}"))
+        assert result is not None
+        assert any("attachment error" in p for p in printed)
+
+
 def test_on_status_change_fires_during_a_turn(tmp_path: Path) -> None:
     """Phase T6: PiApp refreshes its footer live by hooking this callback
     — it must fire at least once per turn (on "done") so the footer isn't
@@ -940,7 +1038,9 @@ class TestSessionCommand:
         target = mgr.create_session(cwd=str(tmp_path), name="past-chat")
         mgr.append_entry(
             target.id,
-            SessionEntry(seq=0, parent_seq=None, kind="message", data={"role": "user", "content": "hello from the past"}),
+            SessionEntry(
+                seq=0, parent_seq=None, kind="message", data={"role": "user", "content": "hello from the past"}
+            ),
         )
 
         asyncio.run(session._handle_command(f"/session resume {target.id}"))

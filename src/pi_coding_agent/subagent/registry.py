@@ -24,6 +24,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+
 @dataclass
 class SubagentResult:
     """Result of a single subagent invocation."""

@@ -29,6 +29,13 @@ from pi_coding_agent.subagent.registry import SubagentHandle, SubagentRegistry, 
 
 _DEFAULT_TIMEOUT = 300.0
 
+# asyncio only holds a weak reference to a task started via create_task —
+# without also keeping a strong reference somewhere, the task can be
+# garbage-collected before it finishes. This set is that strong reference,
+# for the driving tasks spawn_subagent() fires off; each removes itself
+# once done.
+_background_drives: set[asyncio.Task[None]] = set()
+
 
 def _build_args(agent: AgentDef, task: str) -> list[str]:
     """Same Python interpreter that's currently running, so the child
@@ -88,7 +95,9 @@ async def spawn_subagent(
         stderr=asyncio.subprocess.PIPE,
     )
     handle = registry.register(agent.name, task, proc)
-    asyncio.create_task(_drive(handle, timeout=timeout, on_progress=on_progress))
+    drive_task = asyncio.create_task(_drive(handle, timeout=timeout, on_progress=on_progress))
+    _background_drives.add(drive_task)
+    drive_task.add_done_callback(_background_drives.discard)
     return handle
 
 
@@ -172,7 +181,9 @@ async def _drive(
             output = f"[error] {error_message}\n{output}".strip()
         elif (proc.returncode or 0) != 0 and final_status == "done":
             final_status = "error"
-        result = SubagentResult(output=output, exit_code=proc.returncode or 0, agent_name=handle.agent_name, status=final_status)
+        result = SubagentResult(
+            output=output, exit_code=proc.returncode or 0, agent_name=handle.agent_name, status=final_status
+        )
     except TimeoutError:
         proc.kill()
         with contextlib.suppress(Exception):

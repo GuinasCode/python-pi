@@ -53,7 +53,6 @@ from pi_ai import (
     Context,
     DoneEvent,
     ErrorEvent,
-    ImageContent,
     Model,
     StartEvent,
     StopReason,
@@ -71,6 +70,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
+from pi_ai.providers._openai_compat import tool_result_to_openai_messages, user_content_to_openai
 from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -148,24 +148,6 @@ class _UpstreamUnavailable(Exception):
     fallback chain retries the next model for."""
 
 
-def _user_content_to_openai(content: str | list[Any]) -> str | list[dict[str, Any]]:
-    """OpenAI content-part translation for a user message — plain string
-    stays a string, otherwise TextContent/ImageContent blocks become
-    ``{"type": "text", ...}``/``{"type": "image_url", ...}`` parts,
-    mirroring ``pi_ai.providers.openai``'s ``_content_to_openai`` exactly
-    (ImageContent only ever carries base64 data, never a bare remote URL,
-    so a data URI is the only faithful translation here too)."""
-    if isinstance(content, str):
-        return content
-    parts: list[dict[str, Any]] = []
-    for block in content:
-        if isinstance(block, TextContent):
-            parts.append({"type": "text", "text": block.text})
-        elif isinstance(block, ImageContent):
-            parts.append({"type": "image_url", "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"}})
-    return parts
-
-
 def _openai_messages(context: Context) -> list[dict[str, Any]]:
     """Translate pi_ai's Context.messages into OpenAI chat-completions
     message dicts — every model here is on the same OpenAI-compatible
@@ -173,7 +155,7 @@ def _openai_messages(context: Context) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if isinstance(msg, UserMessage):
-            messages.append({"role": "user", "content": _user_content_to_openai(msg.content)})
+            messages.append({"role": "user", "content": user_content_to_openai(msg.content)})
         elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
@@ -195,11 +177,7 @@ def _openai_messages(context: Context) -> list[dict[str, Any]]:
                 openai_msg["tool_calls"] = tool_calls_out
             messages.append(openai_msg)
         elif isinstance(msg, ToolResultMessage):
-            text_parts_tr: list[str] = []
-            for result_block in msg.content:
-                if isinstance(result_block, TextContent):
-                    text_parts_tr.append(result_block.text)
-            messages.append({"role": "tool", "tool_call_id": msg.tool_call_id, "content": "\n".join(text_parts_tr)})
+            messages.extend(tool_result_to_openai_messages(msg))
     if context.system_prompt:
         messages.insert(0, {"role": "system", "content": context.system_prompt})
     return messages

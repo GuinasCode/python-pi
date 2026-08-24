@@ -40,6 +40,7 @@ from pi_ai import (
 )
 from pi_ai.event_stream import create_assistant_message_event_stream
 from pi_ai.models import MutableModels, Provider
+from pi_ai.providers._openai_compat import tool_result_to_openai_messages, user_content_to_openai
 from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -124,12 +125,7 @@ def _create_stream(
     messages: list[dict[str, Any]] = []
     for msg in context.messages:
         if isinstance(msg, UserMessage):
-            content = (
-                msg.content
-                if isinstance(msg.content, str)
-                else "".join(c.text if hasattr(c, "text") else "" for c in msg.content)
-            )
-            messages.append({"role": "user", "content": content})
+            messages.append({"role": "user", "content": user_content_to_openai(msg.content)})
         elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
@@ -154,17 +150,7 @@ def _create_stream(
                 openai_msg["tool_calls"] = tool_calls_out
             messages.append(openai_msg)
         elif isinstance(msg, ToolResultMessage):
-            text_parts_tr: list[str] = []
-            for result_block in msg.content:
-                if isinstance(result_block, TextContent):
-                    text_parts_tr.append(result_block.text)
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": msg.tool_call_id,
-                    "content": "\n".join(text_parts_tr),
-                }
-            )
+            messages.extend(tool_result_to_openai_messages(msg))
 
     if context.system_prompt:
         messages.insert(0, {"role": "system", "content": context.system_prompt})

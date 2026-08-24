@@ -516,7 +516,7 @@ class TestBuiltinWebTools:
 
         calls: list[tuple[str, float]] = []
 
-        def _fake_browser_fetch_url(url: str, *, timeout: float = 30.0) -> ToolResult:
+        def _fake_browser_fetch_url(url: str, *, timeout: float = 30.0, screenshot: bool = False) -> ToolResult:
             calls.append((url, timeout))
             return ToolResult(content=[{"type": "text", "text": "rendered"}])
 
@@ -525,6 +525,24 @@ class TestBuiltinWebTools:
         assert not result.is_error
         assert result.content[0]["text"] == "rendered"
         assert calls == [("https://example.com", 5)]
+
+    def test_execute_tool_dispatches_browser_screenshot_flag(self, monkeypatch: Any) -> None:
+        import pi_coding_agent.agent_session as agent_session_module
+        from pi_coding_agent.agent_session import _execute_tool
+        from pi_coding_agent.tools import ToolResult
+
+        captured: dict[str, object] = {}
+
+        def _fake_browser_fetch_url(url: str, *, timeout: float = 30.0, screenshot: bool = False) -> ToolResult:
+            captured["screenshot"] = screenshot
+            return ToolResult(content=[{"type": "text", "text": "rendered"}])
+
+        monkeypatch.setattr(agent_session_module, "browser_fetch_url", _fake_browser_fetch_url)
+        _execute_tool("browser", {"url": "https://example.com", "screenshot": True})
+        assert captured["screenshot"] is True
+
+        _execute_tool("browser", {"url": "https://example.com"})
+        assert captured["screenshot"] is False
 
 
 class TestSteerAndStop:
@@ -553,7 +571,7 @@ class TestSteerAndStop:
         assert not any(isinstance(m, UserMessage) and m.content not in ("go",) for m in session._messages)
 
     def test_request_stop_short_circuits_before_any_model_call(self) -> None:
-        session, handle = _setup_faux([faux_assistant_message("should not be reached")])
+        session, _handle = _setup_faux([faux_assistant_message("should not be reached")])
         session.request_stop()
         result = asyncio.run(session.prompt("go"))
 
@@ -579,3 +597,66 @@ class TestSteerAndStop:
         assert second is not None
         assert second.stop_reason == StopReason.STOP
         assert any(b.type == "text" and b.text == "first" for b in second.content)
+
+
+class TestImages:
+    def test_prompt_images_are_sent_as_content_blocks(self) -> None:
+        from pi_ai import ImageContent
+
+        session, _ = _setup_faux([faux_assistant_message("I see it")])
+        image = ImageContent(data="Zm9v", mime_type="image/png")
+        asyncio.run(session.prompt("what is this?", images=[image]))
+
+        user_msgs = [m for m in session._messages if getattr(m, "role", "") == "user"]
+        assert len(user_msgs) == 1
+        content = user_msgs[0].content
+        assert isinstance(content, list)
+        assert any(isinstance(b, ImageContent) and b.data == "Zm9v" for b in content)
+        assert any(getattr(b, "text", None) == "what is this?" for b in content)
+
+    def test_prompt_without_images_keeps_plain_string_content(self) -> None:
+        session, _ = _setup_faux([faux_assistant_message("hi")])
+        asyncio.run(session.prompt("hello"))
+        user_msgs = [m for m in session._messages if getattr(m, "role", "") == "user"]
+        assert user_msgs[0].content == "hello"
+
+    def test_tool_returning_an_image_block_reaches_the_conversation_as_image_content(self) -> None:
+        """Regression: _run_tool_call used to build tool_content by
+        filtering for `type == "text"` only, silently dropping any
+        `type == "image"` block a tool returned (e.g. the `read` tool on
+        a png, or a browser screenshot) before it ever reached a
+        provider."""
+        from pi_ai import ImageContent
+
+        session, _ = _setup_faux(
+            [
+                faux_assistant_message(
+                    [faux_tool_call("read", {"path": "__image__"})], stop_reason=StopReason.TOOL_USE
+                ),
+                faux_assistant_message("I see the image"),
+            ]
+        )
+
+        import pi_coding_agent.agent_session as agent_session_module
+
+        original_read_file = agent_session_module.read_file
+
+        def _fake_read_file(path: str, **kwargs: Any) -> Any:
+            from pi_coding_agent.tools import ToolResult
+
+            if path == "__image__":
+                return ToolResult(content=[{"type": "image", "data": "Zm9v", "mime_type": "image/png"}])
+            return original_read_file(path, **kwargs)
+
+        import pi_coding_agent.tools as tools_module
+
+        original = tools_module.read_file
+        agent_session_module.read_file = _fake_read_file  # type: ignore[attr-defined]
+        try:
+            asyncio.run(session.prompt("look at this image"))
+        finally:
+            agent_session_module.read_file = original
+
+        tool_results = [m for m in session._messages if getattr(m, "role", "") == "toolResult"]
+        assert len(tool_results) == 1
+        assert any(isinstance(b, ImageContent) and b.data == "Zm9v" for b in tool_results[0].content)

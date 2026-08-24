@@ -19,7 +19,6 @@ except ImportError:
 from pi_ai import (
     AssistantMessage,
     Context,
-    ImageContent,
     Message,
     Model,
     SimpleStreamOptions,
@@ -34,30 +33,11 @@ from pi_ai import (
     UserMessage,
 )
 from pi_ai.event_stream import AssistantMessageEventStream, create_assistant_message_event_stream
+from pi_ai.providers._openai_compat import tool_result_to_openai_messages, user_content_to_openai
 from pi_ai.utils import describe_exception, spawn_background_task
 
 DEFAULT_API = "openai-completions"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
-
-
-def _content_to_openai(
-    content: str | list[TextContent | ImageContent],
-) -> list[dict[str, Any]]:
-    """Convert pi content blocks to OpenAI message content parts."""
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    parts: list[dict[str, Any]] = []
-    for block in content:
-        if isinstance(block, TextContent):
-            parts.append({"type": "text", "text": block.text})
-        elif isinstance(block, ImageContent):
-            parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
-                }
-            )
-    return parts
 
 
 def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -65,7 +45,7 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for msg in messages:
         if isinstance(msg, UserMessage):
-            result.append({"role": "user", "content": _content_to_openai(msg.content)})
+            result.append({"role": "user", "content": user_content_to_openai(msg.content)})
         elif isinstance(msg, AssistantMessage):
             openai_msg: dict[str, Any] = {"role": "assistant"}
             text_parts: list[str] = []
@@ -92,17 +72,7 @@ def _convert_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 openai_msg["tool_calls"] = tool_calls
             result.append(openai_msg)
         elif isinstance(msg, ToolResultMessage):
-            tool_text_parts: list[str] = []
-            for result_block in msg.content:
-                if isinstance(result_block, TextContent):
-                    tool_text_parts.append(result_block.text)
-            result.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": msg.tool_call_id,
-                    "content": "\n".join(tool_text_parts),
-                }
-            )
+            result.extend(tool_result_to_openai_messages(msg))
     return result
 
 
