@@ -52,7 +52,7 @@ from pi_coding_agent.permission_mode import (
 from pi_coding_agent.resource_loader import load_resources
 from pi_coding_agent.session_manager import SessionEntry, SessionManager
 from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW, PI_THEME
-from pi_memory import MemoryStore
+from pi_memory import MemoryStore, MemoryType
 from pi_tui.raw_input import read_line_with_cycle
 
 _console = Console(highlight=False, soft_wrap=True, theme=PI_THEME)
@@ -81,6 +81,16 @@ def _fmt_args(args: Any) -> str:
                 parts.append(f"{k}={escape(str(v))}")
         return ", ".join(parts)
     return escape(str(args))
+
+
+def _derive_soul_title(text: str) -> str:
+    """Short label for a Soul entry entered as free text via /soul add/edit
+    or the onboarding flow — first few words, not a separate user input."""
+    words = text.strip().split()
+    title = " ".join(words[:8])
+    if len(words) > 8:
+        title += "…"
+    return title or "Principle"
 
 
 def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
@@ -295,7 +305,18 @@ class InteractiveSession:
 
     async def _permission_gate(self, tool_name: str, args: dict[str, Any]) -> bool:
         """AgentSessionOptions.permission_gate: allow/ask/deny a tool call
-        based on the current permission mode, before it runs."""
+        based on the current permission mode, before it runs.
+
+        A `remember(type="soul")` call is a special case: writing a
+        permanent, cross-session principle deserves a real human
+        confirmation regardless of the current PermissionMode (even
+        acceptEdits, which is only about auto-approving file edits) — a
+        second self-issued tool call from the model is not evidence a human
+        actually saw and approved it, so this always routes to the same
+        blocking y/N prompt used for mutating tools, unconditionally.
+        """
+        if tool_name == "remember" and args.get("type") == "soul":
+            return await self._confirm_tool_fn(tool_name, args)
         decision = permission_decision(self._permission_mode, tool_name)
         if decision is PermissionDecision.ALLOW:
             return True
@@ -321,6 +342,127 @@ class InteractiveSession:
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         return answer.strip().lower() in ("y", "yes")
+
+    async def _soul_yes_no(self, prompt_text: str) -> bool:
+        _console.print(f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] {prompt_text} [dim](y/N)[/dim]", end=" ")
+        loop = asyncio.get_running_loop()
+        try:
+            answer = await loop.run_in_executor(None, input)
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        return answer.strip().lower() in ("y", "yes")
+
+    async def _soul_read_line(self, prompt_text: str) -> str:
+        _console.print(f"{prompt_text} ", end="")
+        loop = asyncio.get_running_loop()
+        try:
+            answer = await loop.run_in_executor(None, input)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        return answer.strip()
+
+    async def _handle_soul_command(self, args_text: str) -> None:
+        """/soul [show|add|edit|remove|clear] — direct, explicit management
+        of the user's own MemoryStore, type=soul. Explicit invocation of
+        this command IS the confirmation (unlike the model calling
+        `remember(type="soul")`, which is routed through _permission_gate's
+        real y/N prompt instead)."""
+        store = self._agent_session._memory_store
+        if store is None:
+            self._output.print("[dim]memory is disabled — /soul is unavailable[/dim]")
+            return
+
+        parts = args_text.split(maxsplit=1)
+        sub = parts[0].lower() if parts else "show"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if sub in ("show", ""):
+            records = store.list_by_type(MemoryType.SOUL)
+            if not records:
+                self._output.print("[dim]no Soul principles yet.[/dim]")
+                if await self._soul_yes_no("Want to set some up now?"):
+                    await self._soul_onboarding(store)
+                else:
+                    self._output.print(f"[dim]use [{PASTEL_BLUE}]/soul add <principle>[/{PASTEL_BLUE}] any time[/dim]")
+                return
+            for r in records:
+                self._output.print(f"  [{PASTEL_BLUE}]#{r.id}[/{PASTEL_BLUE}] {escape(r.title)}: {escape(r.content)}")
+            return
+
+        if sub == "add":
+            if not rest:
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /soul add <principle text>")
+                return
+            title = _derive_soul_title(rest)
+            self._output.print(f'About to save as a permanent principle: "{escape(rest)}"')
+            if not await self._soul_yes_no("Confirm?"):
+                self._output.print("[dim]cancelled[/dim]")
+                return
+            record = store.write(type=MemoryType.SOUL, title=title, content=rest, source="manual")
+            self._output.print(f"[{PASTEL_GREEN}]saved[/{PASTEL_GREEN}] soul #{record.id}: {escape(record.title)}")
+            return
+
+        if sub == "edit":
+            id_part, _, text = rest.partition(" ")
+            if not id_part.isdigit() or not text.strip():
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /soul edit <id> <new text>")
+                return
+            new_text = text.strip()
+            updated = store.update(int(id_part), title=_derive_soul_title(new_text), content=new_text)
+            if updated is None:
+                self._output.print(f"[{PASTEL_RED}]no such soul entry:[/{PASTEL_RED}] #{id_part}")
+                return
+            self._output.print(f"[{PASTEL_GREEN}]updated[/{PASTEL_GREEN}] soul #{updated.id}: {escape(updated.title)}")
+            return
+
+        if sub == "remove":
+            if not rest.isdigit():
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /soul remove <id>")
+                return
+            if store.delete(int(rest)):
+                self._output.print(f"[{PASTEL_GREEN}]removed[/{PASTEL_GREEN}] soul #{rest}")
+            else:
+                self._output.print(f"[{PASTEL_RED}]no such soul entry:[/{PASTEL_RED}] #{rest}")
+            return
+
+        if sub == "clear":
+            records = store.list_by_type(MemoryType.SOUL)
+            if not records:
+                self._output.print("[dim]nothing to clear.[/dim]")
+                return
+            if not await self._soul_yes_no(f"Remove all {len(records)} soul principle(s)? This cannot be undone."):
+                self._output.print("[dim]cancelled[/dim]")
+                return
+            for r in records:
+                store.delete(r.id)
+            self._output.print(f"[{PASTEL_GREEN}]cleared[/{PASTEL_GREEN}] {len(records)} soul principle(s)")
+            return
+
+        self._output.print(f"[{PASTEL_RED}]unknown /soul subcommand:[/{PASTEL_RED}] {escape(sub)}")
+
+    async def _soul_onboarding(self, store: MemoryStore) -> None:
+        """Iterative, one-question-at-a-time construction flow — never a
+        30-question form. Each answer is confirmed individually before
+        being written; a blank answer skips that question."""
+        questions = [
+            "Como você quer que eu me comporte?",
+            "Quais princípios devo seguir sempre?",
+            "Como devo lidar com ambiguidades?",
+            "Quais princípios de engenharia são importantes para você?",
+        ]
+        saved = 0
+        for question in questions:
+            answer = await self._soul_read_line(f"{question} [dim](enter para pular)[/dim]")
+            if not answer:
+                continue
+            if not await self._soul_yes_no(f'Salvar como princípio permanente: "{answer}"?'):
+                continue
+            record = store.write(
+                type=MemoryType.SOUL, title=_derive_soul_title(answer), content=answer, source="soul_onboarding"
+            )
+            saved += 1
+            self._output.print(f"[{PASTEL_GREEN}]saved[/{PASTEL_GREEN}] soul #{record.id}")
+        self._output.print(f"[dim]done — {saved} principle(s) saved. Use /soul any time to review.[/dim]")
 
     def _restore_persisted_messages(self) -> None:
         if not self._session_manager or not self._session_id:
@@ -935,6 +1077,8 @@ class InteractiveSession:
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
                 f"  [{PASTEL_BLUE}]/extensions[/{PASTEL_BLUE}]  List loaded extensions and load errors\n"
+                f"  [{PASTEL_BLUE}]/soul[/{PASTEL_BLUE}]     Show/manage permanent principles "
+                "(add/edit/remove/clear)\n"
             )
             return True
 
@@ -1036,6 +1180,11 @@ class InteractiveSession:
                 self._output.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
             else:
                 self._output.print("[dim]no active session[/dim]")
+            return True
+
+        if cmd == "/soul" or cmd.startswith("/soul "):
+            args_text = command[len("/soul") :].strip()
+            await self._handle_soul_command(args_text)
             return True
 
         if cmd == "/extensions":

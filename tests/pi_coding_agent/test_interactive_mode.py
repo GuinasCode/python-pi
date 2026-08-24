@@ -16,6 +16,7 @@ from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
 from pi_coding_agent.interactive_mode import InteractiveSession
 from pi_coding_agent.session_manager import SessionManager
+from pi_memory.store import MemoryType
 
 
 def _make_session(tmp_path: Path) -> InteractiveSession:
@@ -327,6 +328,38 @@ class TestPermissionGate:
         session = _make_session(tmp_path)
         with patch("builtins.input", side_effect=AssertionError("should not prompt for read")):
             allowed = asyncio.run(session._permission_gate("read", {"path": "x"}))
+        assert allowed is True
+
+    def test_remember_soul_always_asks_even_in_accept_edits_mode(self, tmp_path: Path) -> None:
+        """A confirm_soul-style second self-issued tool call is not real user
+        confirmation — remember(type=soul) must route to a real y/N prompt,
+        unconditionally, not be silently ALLOWed just because the user
+        happens to be in acceptEdits mode (which is only about file edits)."""
+        session = _make_session(tmp_path)
+        session._permission_mode = session._permission_mode.ACCEPT_EDITS
+        with patch("builtins.input", return_value="y") as mock_input:
+            allowed = asyncio.run(
+                session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"})
+            )
+        assert allowed is True
+        mock_input.assert_called_once()
+
+    def test_remember_soul_honors_rejection(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        with patch("builtins.input", return_value="n"):
+            allowed = asyncio.run(
+                session._permission_gate("remember", {"type": "soul", "title": "x", "content": "y"})
+            )
+        assert allowed is False
+
+    def test_remember_non_soul_type_unaffected(self, tmp_path: Path) -> None:
+        """remember isn't in MUTATING_TOOL_NAMES, so a non-soul type keeps
+        the pre-existing behavior: no gate, no prompt at all."""
+        session = _make_session(tmp_path)
+        with patch("builtins.input", side_effect=AssertionError("should not prompt for non-soul remember")):
+            allowed = asyncio.run(
+                session._permission_gate("remember", {"type": "decision", "title": "x", "content": "y"})
+            )
         assert allowed is True
 
 
@@ -820,3 +853,96 @@ class TestPromptHistory:
 
         asyncio.run(session.repl_loop())
         assert session._prompt_history == ["/clear", "hello there"]
+
+
+class TestSoulCommand:
+    def test_show_empty_offers_onboarding_and_declining_is_a_noop(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        with patch("builtins.input", return_value="n"):
+            asyncio.run(session._handle_command("/soul"))
+        assert store.list_by_type(MemoryType.SOUL) == []
+
+    def test_add_confirmed_saves_entry(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        with patch("builtins.input", return_value="y"):
+            asyncio.run(session._handle_command("/soul add always ask before deleting files"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert "always ask before deleting files" in records[0].content
+
+    def test_add_declined_saves_nothing(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        with patch("builtins.input", return_value="n"):
+            asyncio.run(session._handle_command("/soul add always ask before deleting files"))
+        assert store.list_by_type(MemoryType.SOUL) == []
+
+    def test_add_without_text_shows_usage_and_does_not_prompt(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        with patch("builtins.input", side_effect=AssertionError("should not prompt without text")):
+            asyncio.run(session._handle_command("/soul add"))
+
+    def test_show_lists_existing_entries(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="Be careful", content="Always confirm destructive actions.")
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/soul show"))
+        assert any("Be careful" in line for line in printed)
+
+    def test_edit_updates_entry(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        record = store.write(type=MemoryType.SOUL, title="Old", content="Old content")
+
+        asyncio.run(session._handle_command(f"/soul edit {record.id} New content here"))
+        updated = store.list_by_type(MemoryType.SOUL)[0]
+        assert updated.id == record.id
+        assert "New content here" in updated.content
+
+    def test_edit_missing_id_reports_error(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        asyncio.run(session._handle_command("/soul edit 999 some text"))  # should not raise
+
+    def test_remove_deletes_entry(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        record = store.write(type=MemoryType.SOUL, title="Removable", content="delete me")
+
+        asyncio.run(session._handle_command(f"/soul remove {record.id}"))
+        assert store.list_by_type(MemoryType.SOUL) == []
+
+    def test_clear_confirmed_removes_all(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="1")
+        store.write(type=MemoryType.SOUL, title="b", content="2")
+
+        with patch("builtins.input", return_value="y"):
+            asyncio.run(session._handle_command("/soul clear"))
+        assert store.list_by_type(MemoryType.SOUL) == []
+
+    def test_clear_declined_keeps_entries(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="1")
+
+        with patch("builtins.input", return_value="n"):
+            asyncio.run(session._handle_command("/soul clear"))
+        assert len(store.list_by_type(MemoryType.SOUL)) == 1
+
+    def test_unknown_subcommand_does_not_raise(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        asyncio.run(session._handle_command("/soul bogus"))

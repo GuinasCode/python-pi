@@ -13,6 +13,10 @@ from pi_memory.store import MemoryStore, MemoryType
 from pi_memory.tools import create_memory_tools
 
 
+def _text(result: object) -> str:
+    return "".join(getattr(b, "text", "") for b in result.content)  # type: ignore[attr-defined]
+
+
 class _UnavailableEmbeddingManager(EmbeddingManager):
     def is_available(self) -> bool:
         return False
@@ -238,4 +242,140 @@ class TestRememberDuplicateFlow:
         assert len(results) == 1
         assert results[0].id == existing.id
         assert results[0].title == "Terse & direct replies"
+        store.close()
+
+
+class TestRememberSoulGating:
+    def test_soul_write_refused_when_not_interactive(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        remember_tool, _recall_tool = create_memory_tools(store, interactive=False)
+        assert remember_tool.execute is not None
+
+        result = asyncio.run(
+            remember_tool.execute(
+                "call-1",
+                {"type": "soul", "title": "Permanent principle", "content": "Always ask before deleting."},
+                None,
+                None,
+            )
+        )
+        assert "Refused" in _text(result)
+        assert store.list_by_type(MemoryType.SOUL) == []
+        store.close()
+
+    def test_soul_write_allowed_when_interactive(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        remember_tool, _recall_tool = create_memory_tools(store, interactive=True)
+        assert remember_tool.execute is not None
+
+        result = asyncio.run(
+            remember_tool.execute(
+                "call-1",
+                {"type": "soul", "title": "Permanent principle", "content": "Always ask before deleting."},
+                None,
+                None,
+            )
+        )
+        assert "Remembered" in _text(result)
+        assert len(store.list_by_type(MemoryType.SOUL)) == 1
+        store.close()
+
+    def test_non_soul_writes_unaffected_by_interactive_flag(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        remember_tool, _recall_tool = create_memory_tools(store, interactive=False)
+        assert remember_tool.execute is not None
+
+        result = asyncio.run(
+            remember_tool.execute(
+                "call-1",
+                {"type": "decision", "title": "Use SQLite", "content": "Chosen over Postgres."},
+                None,
+                None,
+            )
+        )
+        assert "Remembered" in _text(result)
+        store.close()
+
+
+class TestSystemPromptSoulBlock:
+    def test_soul_block_included_when_present(self) -> None:
+        session = _setup_session(None)
+        prompt = session._build_system_prompt(None, ["Always ask before deleting files."])
+        assert "<soul>" in prompt
+        assert "Always ask before deleting files." in prompt
+
+    def test_soul_block_absent_when_none(self) -> None:
+        session = _setup_session(None)
+        prompt = session._build_system_prompt(None, None)
+        assert "<soul>" not in prompt
+
+    def test_soul_block_appears_before_memories_block(self) -> None:
+        session = _setup_session(None)
+        prompt = session._build_system_prompt(["[decision] x: y"], ["principle a"])
+        assert prompt.index("<soul>") < prompt.index("<memories>")
+
+    def test_soul_block_states_precedence_over_memories_but_not_over_turn_instruction(self) -> None:
+        session = _setup_session(None)
+        soul_block = session._build_system_prompt(None, ["principle a"]).split("<soul>")[1].split("</soul>")[0]
+        assert "precedence" in soul_block.lower()
+        assert "memories" in soul_block.lower()
+        assert "override" in soul_block.lower()
+        assert "this turn" in soul_block.lower() or "one-turn" in soul_block.lower()
+
+
+class TestAgentSessionLoadSoul:
+    def test_load_soul_returns_entries(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        store.write(type=MemoryType.SOUL, title="Be careful", content="Always confirm destructive actions.")
+        session = _setup_session(store)
+
+        soul = asyncio.run(session._load_soul())
+        assert any("Be careful" in s for s in soul)
+        store.close()
+
+    def test_load_soul_empty_without_store(self) -> None:
+        session = _setup_session(None)
+        assert asyncio.run(session._load_soul()) == []
+
+    def test_load_soul_reflects_writes_made_after_session_init(self) -> None:
+        """Soul must not be a stale __init__-time snapshot: a write made
+        mid-session (e.g. via /soul or the remember tool) must show up on
+        the very next call, with no cache-invalidation step required."""
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        session = _setup_session(store)
+
+        assert asyncio.run(session._load_soul()) == []
+        store.write(type=MemoryType.SOUL, title="New principle", content="Added mid-session.")
+        soul = asyncio.run(session._load_soul())
+        assert any("New principle" in s for s in soul)
+        store.close()
+
+    def test_recall_memories_excludes_soul_entries(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        store.write(type=MemoryType.SOUL, title="Terse soul principle", content="Prefer terse replies always.")
+        store.write(type=MemoryType.STYLE, title="Terse style memory", content="User prefers terse responses.")
+        session = _setup_session(store)
+
+        memories = asyncio.run(session._recall_memories("terse"))
+        assert not any("soul" in m.lower() or "Terse soul principle" in m for m in memories)
+        assert any("Terse style memory" in m for m in memories)
+        store.close()
+
+
+class TestRememberSecretGuardViaTool:
+    def test_remember_tool_refuses_secret(self) -> None:
+        store = MemoryStore(":memory:", embeddings=_UnavailableEmbeddingManager())
+        remember_tool, _recall_tool = create_memory_tools(store)
+        assert remember_tool.execute is not None
+
+        result = asyncio.run(
+            remember_tool.execute(
+                "call-1",
+                {"type": "user", "title": "key", "content": "sk-abcdefghijklmnopqrstuvwx1234567890"},
+                None,
+                None,
+            )
+        )
+        assert "credential" in _text(result).lower()
+        assert store.search("key", top_k=5) == []
         store.close()

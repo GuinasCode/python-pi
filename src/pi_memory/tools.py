@@ -13,7 +13,7 @@ from typing import Any
 
 from pi_agent_core.types import AgentTool, AgentToolResult
 from pi_ai import TextContent
-from pi_memory.store import MemoryStore, MemoryType
+from pi_memory.store import MemoryStore, MemoryType, SecretDetectedError
 
 _MEMORY_TYPES = [t.value for t in MemoryType]
 
@@ -22,8 +22,15 @@ def _ok(text: str) -> AgentToolResult:
     return AgentToolResult(content=[TextContent(text=text)])
 
 
-def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
-    """Return ``[remember, recall]`` AgentTools bound to *store*."""
+def create_memory_tools(store: MemoryStore, *, interactive: bool = True) -> list[AgentTool]:
+    """Return ``[remember, recall]`` AgentTools bound to *store*.
+
+    *interactive* mirrors ``AgentSessionOptions.interactive``: when False
+    (print mode, subagent runs — no human present to confirm anything),
+    writes of type=soul are refused outright. There is no permission gate
+    to route a confirmation through in that context, so a permanent
+    principle must never be written unattended.
+    """
 
     async def _remember(
         _tool_call_id: str,
@@ -42,12 +49,23 @@ def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
         if not title or not content:
             return _ok("Both 'title' and 'content' are required.")
 
+        if memory_type is MemoryType.SOUL and not interactive:
+            return _ok(
+                "Refused: type=soul requires an interactive session where the user can be asked "
+                "to confirm — not available in this (non-interactive) context."
+            )
+
         merge_id = args.get("merge_id")
         force = bool(args.get("force", False))
         loop = asyncio.get_running_loop()
 
         if merge_id is not None:
-            record = await loop.run_in_executor(None, lambda: store.update(int(merge_id), title=title, content=content))
+            try:
+                record = await loop.run_in_executor(
+                    None, lambda: store.update(int(merge_id), title=title, content=content)
+                )
+            except SecretDetectedError as exc:
+                return _ok(str(exc))
             if record is None:
                 return _ok(f"No memory with id {merge_id} found to merge into.")
             return _ok(f"Merged into [{record.type.value}] #{record.id} {record.title}")
@@ -70,10 +88,13 @@ def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
                     "and the corrected title/content"
                 )
 
-        record = await loop.run_in_executor(
-            None,
-            lambda: store.write(type=memory_type, title=title, content=content, source="manual"),
-        )
+        try:
+            record = await loop.run_in_executor(
+                None,
+                lambda: store.write(type=memory_type, title=title, content=content, source="manual"),
+            )
+        except SecretDetectedError as exc:
+            return _ok(str(exc))
         return _ok(f"Remembered [{record.type.value}] {record.title}")
 
     async def _recall(
@@ -101,6 +122,13 @@ def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
             "Use type=decision for technical/architectural decisions and type=style for the "
             "user's stated stylistic preferences — these should be captured proactively, without "
             "waiting for the user to ask.\n"
+            "type=soul is different from every other type: it is a PERMANENT principle that "
+            "applies to every future session, not an episodic fact. Only use type=soul when the "
+            "user explicitly asks you to remember something as a lasting principle/rule (e.g. "
+            "'remember this permanently', 'from now on always...') — never proactively, and never "
+            "just because something sounds important. In an interactive session this call will be "
+            "routed to the user for a real yes/no confirmation before anything is written; if the "
+            "user declines, do not retry with the same content.\n"
             "By default this checks for a likely-duplicate existing memory first: if one is found, "
             "nothing is saved and the result asks you to summarize the overlap/difference to the "
             "user and get their call before calling remember again. Pass force=true to save anyway "
@@ -110,7 +138,15 @@ def create_memory_tools(store: MemoryStore) -> list[AgentTool]:
         parameters={
             "type": "object",
             "properties": {
-                "type": {"type": "string", "enum": _MEMORY_TYPES, "description": "Category of memory"},
+                "type": {
+                    "type": "string",
+                    "enum": _MEMORY_TYPES,
+                    "description": (
+                        "Category of memory. 'soul' is a permanent, cross-session principle — "
+                        "only use it on an explicit, permanence-signaling user request; see the "
+                        "tool description."
+                    ),
+                },
                 "title": {"type": "string", "description": "Short title summarizing the memory"},
                 "content": {"type": "string", "description": "The fact or preference to remember"},
                 "merge_id": {

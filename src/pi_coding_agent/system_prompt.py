@@ -34,6 +34,12 @@ class BuildSystemPromptOptions:
     # whether the <memory_policy> guideline (instructing the model to call
     # `remember` proactively) is included.
     memory_enabled: bool = False
+    # Every persisted Soul principle (type=soul), already formatted as
+    # "title: content". Unlike `memories`, this is a guaranteed direct read
+    # by type (see AgentSession._load_soul), not a similarity-search result
+    # — so it's included whenever any Soul entries exist, independent of
+    # whether they happen to match the current turn's text.
+    soul: list[str] | None = None
 
 
 def build_system_prompt(options: BuildSystemPromptOptions) -> str:
@@ -47,6 +53,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
         prompt = options.custom_prompt
         if append_section:
             prompt += append_section
+        prompt += _format_soul_for_prompt(options.soul)
         prompt += _format_memories_for_prompt(options.memories)
         prompt += _memory_policy_block(options.memory_enabled)
         if context_files:
@@ -156,6 +163,7 @@ def build_system_prompt(options: BuildSystemPromptOptions) -> str:
     if append_section:
         prompt += append_section
 
+    prompt += _format_soul_for_prompt(options.soul)
     prompt += _format_memories_for_prompt(options.memories)
     prompt += _memory_policy_block(options.memory_enabled)
 
@@ -187,6 +195,30 @@ _MEMORY_POLICY = (
     "then call `remember` again once with the outcome they chose.\n"
     "</memory_policy>\n"
 )
+
+
+_SOUL_HEADER = (
+    "\n\n<soul>\n"
+    "These are permanent, cross-session principles — your default behavior, "
+    "listed below. They take precedence over anything in <memories> (which is "
+    "episodic/contextual, not permanent).\n"
+    "They do NOT override a specific, valid instruction the user gives you this "
+    "turn, nor any rule from your system instructions — those come first. If the "
+    "user's request for this turn conflicts with a principle below, that is "
+    "normally just a one-turn deviation: follow the turn's instruction for this "
+    "response only, and do not change or re-confirm the principle. Only treat it "
+    "as a change to the principle itself when the user's language signals "
+    "permanence (e.g. \"from now on\", \"always\", \"I want this to be a "
+    "permanent rule\") — in that case, propose the update via `remember` "
+    "(type=soul), which will ask the user to confirm before anything is saved.\n"
+)
+
+
+def _format_soul_for_prompt(soul: list[str] | None) -> str:
+    if not soul:
+        return ""
+    lines = "\n".join(f"- {s}" for s in soul)
+    return f"{_SOUL_HEADER}{lines}\n</soul>\n"
 
 
 def _format_memories_for_prompt(memories: list[str] | None) -> str:

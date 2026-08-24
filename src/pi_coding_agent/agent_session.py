@@ -61,7 +61,7 @@ from pi_coding_agent.tools import (
     read_file,
     write_file,
 )
-from pi_memory import MemoryStore, create_memory_tools
+from pi_memory import MemoryStore, MemoryType, create_memory_tools
 
 
 @dataclass
@@ -374,7 +374,10 @@ class AgentSession:
                 excluded = set(options.no_tools)
                 base_tools = [t for t in base_tools if t.name not in excluded]
         if self._memory_store is not None and not any(t.name == "remember" for t in base_tools):
-            base_tools = [*base_tools, *create_memory_tools(self._memory_store)]
+            base_tools = [
+                *base_tools,
+                *create_memory_tools(self._memory_store, interactive=self._interactive),
+            ]
         if options.enable_subagents and not any(t.name == "subagent" for t in base_tools):
             try:
                 from pi_coding_agent.subagent.tool import create_subagent_tool
@@ -553,7 +556,7 @@ class AgentSession:
             self._tools = [*self._tools, *extension_tools]
             self._extension_tool_names = {t.name for t in extension_tools}
 
-    def _build_system_prompt(self, memories: list[str] | None = None) -> str:
+    def _build_system_prompt(self, memories: list[str] | None = None, soul: list[str] | None = None) -> str:
         """Build the system prompt from options."""
         if self._system_prompt:
             prompt = self._system_prompt
@@ -571,11 +574,15 @@ class AgentSession:
                 interactive=self._interactive,
                 memories=memories,
                 memory_enabled=self._memory_store is not None,
+                soul=soul,
             )
         )
 
     async def _recall_memories(self, text: str) -> list[str]:
-        """Fetch the top matching memories for this turn, never raising."""
+        """Fetch the top matching (non-Soul) memories for this turn, never
+        raising. Soul is excluded here — it has its own guaranteed,
+        always-loaded block (see _load_soul) so the same principle never
+        shows up twice under two different implied priorities."""
         store = self._memory_store
         if store is None:
             return []
@@ -587,7 +594,27 @@ class AgentSession:
             )
         except Exception:
             return []
-        return [f"[{r.type.value}] {r.title}: {r.content}" for r in records]
+        return [f"[{r.type.value}] {r.title}: {r.content}" for r in records if r.type is not MemoryType.SOUL]
+
+    async def _load_soul(self) -> list[str]:
+        """Fetch every Soul principle fresh, every turn — a direct read by
+        type, not a similarity search, so it's never conditioned on the
+        current turn's text matching. Fetched fresh (not cached from
+        __init__) so edits made mid-session via /soul or the remember tool
+        take effect on the very next turn without needing explicit
+        cache invalidation."""
+        store = self._memory_store
+        if store is None:
+            return []
+        loop = asyncio.get_running_loop()
+        try:
+            records = await loop.run_in_executor(
+                None,
+                lambda: store.list_by_type(MemoryType.SOUL, project_cwd=self._cwd),
+            )
+        except Exception:
+            return []
+        return [f"{r.title}: {r.content}" for r in records]
 
     async def _emit_ext(self, event_name: str, event: Any) -> None:
         """Fire a notification-only extension lifecycle event, if an
@@ -604,7 +631,8 @@ class AgentSession:
             self._session_started = True
 
         memories = await self._recall_memories(text)
-        system_prompt = self._build_system_prompt(memories)
+        soul = await self._load_soul()
+        system_prompt = self._build_system_prompt(memories, soul)
         user_msg = UserMessage(content=text, timestamp=int(time.time() * 1000))
         self._messages.append(user_msg)
 
