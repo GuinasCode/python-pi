@@ -428,6 +428,21 @@ ones included, since it's kind-agnostic); `branch()` truncates a fork at a given
 inspecting "what if we'd stopped at step N"; `replay()` returns the full ordered lineage of
 every snapshot, not just the latest.
 
+Fase 13 added `src/pi_runtime/mcp.py`: `MCPAdapter`/`MCPClient`/`MCPToolDescriptor`. Plan.md's
+explicit rule — "MCP deve ser adapter sobre o Tool Registry. Não crie uma segunda semântica de
+tool" — is literal here: `register_server()` turns every tool an `MCPClient` reports into a
+real `ToolSpec` in the same `ToolRegistry` builtin tools use (Fase 3, unchanged); `call()`
+routes through the same `PolicyEngine` before execution, no parallel tool-calling path. No
+`mcp` Python SDK is installed or declared as a dependency anywhere in this repo, and no MCP
+server is configured to connect to — `McpSdkClient` raises an explicit `MCPUnavailable` the
+moment the SDK is missing (verified by a real test confirming `mcp_sdk_available()` is
+genuinely `False` in this environment, not simulated), rather than adding the dependency
+speculatively or faking a working connection (Regra 1.3/1.5). `InMemoryMcpClient` is
+explicitly a test double (Regra 1.3 permits mocks in tests) that validates the adapter's real
+registry/policy wiring without needing a live server. Every MCP tool defaults to `Risk.MEDIUM`
++ confirmation-required (same bar as `write`/`edit`/`browser` in `default_registry()`) since
+there's no protocol-level signal to classify an external, unreviewed MCP tool more precisely.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
