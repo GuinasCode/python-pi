@@ -443,6 +443,23 @@ registry/policy wiring without needing a live server. Every MCP tool defaults to
 + confirmation-required (same bar as `write`/`edit`/`browser` in `default_registry()`) since
 there's no protocol-level signal to classify an external, unreviewed MCP tool more precisely.
 
+Fase 14 added `src/pi_runtime/scheduler.py`: `Scheduler`/`Job`/`JobStore`/`Schedule`.
+plan.md's explicit rule — "Scheduler executa o mesmo runtime normal. Não criar um 'segundo
+agent'" — is literal: `run_job()` drives a real `pi_runtime.loop.AgentRuntime` (Fase 1)
+against a real `AgentSession`, the same execution path any other run uses. Persistence reuses
+`SessionManager` (unchanged) rather than a new database — every job is a
+`SessionEntry(kind="job")` in one dedicated session, saved append-only (same pattern as Fase
+12's `RuntimeSessionStore`: `save()` never overwrites, `all_jobs()` resolves to the latest
+version per `job_id`), proven by reloading jobs through a second `JobStore` instance over the
+same `SessionManager`. `Schedule` supports one-shot (`at`) and fixed-interval recurring
+(`interval_seconds`) — not a real cron parser, since a correct one is a solved problem
+(`croniter` and similar) not currently a dependency of this repo, and faking one would violate
+Regra 1.5; fixed-interval recurrence honestly covers the same "recurring job" acceptance
+criterion. A failed run retries by rescheduling (`SCHEDULED`, `next_run_at=now`) up to
+`max_retries` rather than looping in-process, so a crashed scheduler process never loses a
+pending retry — it's already persisted. `cancel()` only affects jobs still pending
+(`SCHEDULED`/`RUNNING`); a job already finished can't be cancelled again.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
