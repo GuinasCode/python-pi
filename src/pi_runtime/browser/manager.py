@@ -48,6 +48,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pi_runtime.browser.backend import BrowserBackend, launch_browser
 from pi_runtime.browser.downloads import DownloadResult, save_download
 from pi_runtime.browser.evaluate import EvaluateResult, bound_evaluate_result
 from pi_runtime.browser.interactions import InteractionResult, InteractionStatus, classify_playwright_error
@@ -102,11 +103,17 @@ class BrowserManager:
         default_timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         headless: bool = True,
         telemetry_sink: BrowserTelemetrySink | None = None,
+        backend: BrowserBackend = BrowserBackend.PLAYWRIGHT_LOCAL,
+        cdp_url: str | None = None,
+        executable_path: str | None = None,
     ) -> None:
         self._policy_engine = policy_engine
         self._default_timeout_seconds = default_timeout_seconds
         self._headless = headless
         self._telemetry_sink = telemetry_sink
+        self._backend = backend
+        self._cdp_url = cdp_url
+        self._executable_path = executable_path
         self._sessions: dict[str, BrowserSession] = {}
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -168,7 +175,13 @@ class BrowserManager:
             from playwright.async_api import async_playwright
 
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=self._headless)
+            self._browser = await launch_browser(
+                self._playwright,
+                backend=self._backend,
+                headless=self._headless,
+                cdp_url=self._cdp_url,
+                executable_path=self._executable_path,
+            )
         return self._browser
 
     async def open_session(
