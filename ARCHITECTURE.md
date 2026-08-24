@@ -386,6 +386,21 @@ source Fase 2 explicitly named but deferred (no selection mechanism existed then
 real; omitting the parameter behaves exactly as before (verified — Fase 2's own tests pass
 untouched).
 
+Fase 10 added `src/pi_runtime/router.py`: `ModelRouter`/`RoutingDecision`/`TaskType`/`Tier`.
+Routes a `TaskType` to a desired capability `Tier` (classification/subagent->cheap,
+general/coding->medium, planning/research/verification->strong, plan.md's own examples) and
+picks from whatever's actually registered in a real `MutableModels` (unchanged, not a second
+model registry) — `classify_model_tier()` reads a model's own already-declared `reasoning`/
+`context_window` fields rather than guessing. Fallback on a missing tier follows a fixed table
+(deterministic, never timing-dependent); `estimate_cost()` reuses `Model.cost`'s existing $-per-
+1M-token rates (the same convention `openai_provider`'s `cost_input=2.50` default already
+uses); a candidate whose cost would exceed a given `Budget`'s remaining `max_cost` is skipped
+in the same fallback order. No matching model at any tier (or none within budget) returns an
+explicit `unavailable_reason`, never a bare `None`. Credential pooling and provider-failure
+retry are not reinvented — `pi_ai.models`'s `CredentialStore` and `nvidia_models.py`'s
+`nvidia/auto` fallback chain already cover those; this module's job is purely deciding which
+tier a task needs before either of them runs.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
