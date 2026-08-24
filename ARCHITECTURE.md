@@ -486,6 +486,18 @@ deterministic functions over data every earlier phase already produces (e.g.
 exact rule from Fase 4's own docstring; `skills_regression_rate` reuses Fase 8's
 `check_regression` rather than a second regression concept).
 
+Fase 17 added `src/pi_runtime/cli.py`, a separate entrypoint (`python -m pi_runtime.cli`) over
+`AgentRuntime`/`Scheduler`/`RuntimeSessionStore`/`ResearchEngine` — `run`/`research`/
+`jobs enqueue|list|cancel|tick`/`sessions resume|replay`. Deliberately kept out of
+`pi_coding_agent`'s own CLI/interactive_mode/TUI (large, delicate, already-shipped surfaces) —
+plan.md's own rule is to wire the runtime in only once it's stable, and folding 17 phases of
+new surface into that CLI in one pass would be exactly the large-blast-radius change Regra 1.6
+warns against. Model/provider setup reuses `pi_coding_agent.print_mode._setup_models`
+unchanged rather than a second provider-selection implementation. Every command prints exactly
+one JSON object to stdout (plan.md section 21's literal rule), verified end to end with a real
+subprocess invocation (`python -m pi_runtime.cli run "say hi"`, faux provider, no network) in
+addition to the in-process test suite.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
