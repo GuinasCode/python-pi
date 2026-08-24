@@ -15,7 +15,7 @@ import asyncio
 from typing import Any
 
 from pi_coding_agent.tools import ToolResult, execute_bash, fetch_url, grep_search, list_files, read_file
-from pi_runtime.execute_code.rpc import RpcError
+from pi_runtime.execute_code.rpc import RpcError, RpcHandler
 
 # terminal is capped well below execute_bash's own 120s default so a
 # runaway command inside execute_code can't tie up the parent's RPC
@@ -100,7 +100,7 @@ async def fetch_url_handler(_tool: str, arguments: dict[str, Any]) -> str:
 # (spec section 6/8): a script can only reach the tools this dict names,
 # so recursion into execute_code and unconstrained subagent spawning are
 # blocked structurally, not by a runtime check that could be bypassed.
-DEFAULT_HANDLERS = {
+DEFAULT_HANDLERS: dict[str, RpcHandler] = {
     "read_file": read_file_handler,
     "search_files": search_files_handler,
     "list_files": list_files_handler,

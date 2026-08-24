@@ -112,6 +112,53 @@ print("echoed:", "integration-ok" in echoed)
         assert "echoed: True" in result.stdout.preview
         assert result.rpc_call_count == 2
 
+    def test_workflow_conditional_branching_over_structured_results(self, tmp_path: Path) -> None:
+        """Spec section 45's third example scenario: a script reads a
+        test-results-shaped file, branches on pass/fail, and returns a
+        small structured JSON summary instead of the raw report — the
+        exact "full result -> Python -> filtering -> small result"
+        pipeline (spec section 7), now combined with conditional logic
+        rather than just a single filter."""
+        import json as _json
+
+        report = tmp_path / "results.json"
+        report.write_text(
+            _json.dumps(
+                {
+                    "tests": [
+                        {"name": "test_a", "outcome": "passed"},
+                        {"name": "test_b", "outcome": "failed", "error": "AssertionError"},
+                        {"name": "test_c", "outcome": "passed"},
+                        {"name": "test_d", "outcome": "failed", "error": "TimeoutError"},
+                    ]
+                }
+            )
+        )
+
+        code = f"""
+import json
+from pi_tools import read_file
+
+raw = read_file({str(report)!r})
+json_text = "".join(line.split("|", 1)[-1] for line in raw.splitlines())
+data = json.loads(json_text)
+failures = [t for t in data["tests"] if t["outcome"] == "failed"]
+
+if failures:
+    summary = {{"ok": False, "failed_count": len(failures), "failed_names": [t["name"] for t in failures]}}
+else:
+    summary = {{"ok": True, "failed_count": 0}}
+
+print(json.dumps(summary))
+"""
+        result = asyncio.run(_executor(tmp_path).execute(code, rpc_handlers=DEFAULT_HANDLERS, timeout=15))
+        assert result.status == ExecutionStatus.SUCCESS
+
+        import json as _json2
+
+        summary = _json2.loads(result.stdout.preview.strip())
+        assert summary == {"ok": False, "failed_count": 2, "failed_names": ["test_b", "test_d"]}
+
     def test_only_the_final_print_reaches_the_result_not_intermediate_file_contents(self, tmp_path: Path) -> None:
         """The literal architectural requirement (spec section 7): full
         result -> Python -> filtering -> small result -> model context,
