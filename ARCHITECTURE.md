@@ -473,6 +473,19 @@ the run's `stop_reason`. Every span shares one `Trace`'s `trace_id`; `record_cos
 — quanto custou, quanto tempo levou, quais tools usou, onde falhou, por que terminou — proven
 end to end in `TestReconstructTheRunFromTelemetry`.
 
+Fase 16 added `src/pi_runtime/evals.py`: mechanical behavioral metrics across the 5 suites
+plan.md section 20 names (Agent/Research/Memory/Delegation/Skills). Does not replace
+`pi_evals` (already a real harness — `pi_harness.py` wraps `AgentSession`, `judges.py` does
+LLM-as-judge scoring, `harness_table.py` does baseline/candidate comparisons — for evaluating
+chat-style output quality). The gap: plan.md's own explicit rule against measuring only
+"output contains X" needed metrics computed directly from `pi_runtime`'s own structured data
+— `AgentState` (Fase 1), `ResearchResult` (Fase 4), `RankedMemory` (Fase 7), `DelegationOutcome`
+(Fase 6), `SkillSelection` (Fase 9) — none of which need an LLM judge, since they're
+deterministic functions over data every earlier phase already produces (e.g.
+`research_citation_precision` catches a claim marked supported with no `evidence_refs`, the
+exact rule from Fase 4's own docstring; `skills_regression_rate` reuses Fase 8's
+`check_regression` rather than a second regression concept).
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
