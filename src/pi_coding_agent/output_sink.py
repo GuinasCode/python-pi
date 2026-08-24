@@ -42,7 +42,18 @@ class ConsoleOutputSink:
         self._console.print(markup, end=end)
 
     def print_renderable(self, renderable: RenderableType) -> None:
-        self._console.print(renderable)
+        # soft_wrap=False overrides the console's own soft_wrap=True default
+        # (set for single-line markup prints — see interactive_mode._console)
+        # for exactly this call. Without it, Rich's render_options.no_wrap
+        # propagates into every renderable's __rich_console__ — including
+        # Markdown's paragraph/list-item Text elements and diff Table cells
+        # — disabling Rich's own word-wrap. A line longer than the terminal
+        # width then has no embedded newline at all; whether it visually
+        # continues on the next row is left entirely to the terminal's own
+        # auto-wrap, which some terminals don't honor the same way Rich's
+        # crop/pad buffer flush does — the intermittent line truncation this
+        # fixes.
+        self._console.print(renderable, soft_wrap=False)
 
 
 class NullOutputSink:
