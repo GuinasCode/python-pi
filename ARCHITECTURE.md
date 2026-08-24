@@ -301,6 +301,19 @@ tool makes "tool não registrada não executa" literally true, propagating as
 `PolicyViolation` into `AgentRuntime`'s existing failure handling. Opt-in (`Executor()` with
 no `policy_engine` skips the check entirely, unchanged Fase 1/2 behavior).
 
+Fase 4 added `src/pi_runtime/research.py`: `Evidence`/`Claim`/`ResearchTask`/`ResearchResult`
+(plan.md 8) plus `ResearchEngine` and `ResearchVerifier`. Scoped deliberately small — there is
+no real web-search API configured anywhere in this repo, so a query planner/search provider
+that turns a question into URLs would have to fabricate results to demonstrate anything
+(forbidden by Regra 1.3, "não use mocks como produto"). What's real here: `ToolExtractProvider`
+wraps the existing, already-tested `fetch_url` tool (not a second HTTP client) to turn a
+caller-supplied URL into provenance-preserving `Evidence`; `ResearchEngine.research()` reports
+coverage honestly, including recognizing "no evidence gathered" instead of inventing certainty
+(plan.md section 6); `ResearchVerifier` rejects any claim marked supported with no evidence
+refs, reusing `pi_runtime.state.VerificationResult` rather than a second verification concept.
+Claim synthesis from evidence (needs a real LLM call) and a real search provider are explicit
+TODOs (Regra 1.5), not faked.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
