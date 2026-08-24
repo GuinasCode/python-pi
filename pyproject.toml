@@ -40,6 +40,7 @@ dev = [
     "types-pyyaml==6.0.12.20260724",
     "python-pi[memory]",
     "python-pi[eval]",
+    "python-pi[browser]",
 ]
 
 [project.scripts]
@@ -55,6 +56,7 @@ packages = [
     "src/pi_ai",
     "src/pi_agent_core",
     "src/pi_runtime",
+    "src/pi_tools",
     "src/pi_tui",
     "src/pi_coding_agent",
     "src/pi_protocol",
