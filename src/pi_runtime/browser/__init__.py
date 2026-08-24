@@ -9,5 +9,6 @@ from __future__ import annotations
 
 from pi_runtime.browser.manager import BrowserManager, NavigationResult
 from pi_runtime.browser.session import BrowserSession
+from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError
 
-__all__ = ["BrowserManager", "BrowserSession", "NavigationResult"]
+__all__ = ["BrowserManager", "BrowserSession", "NavigationResult", "PageSnapshot", "StaleRefError"]

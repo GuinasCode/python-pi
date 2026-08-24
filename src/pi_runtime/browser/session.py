@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext, Page
 
+    from pi_runtime.browser.snapshot import RefTarget
+
 
 @dataclass
 class BrowserSession:
@@ -46,6 +48,10 @@ class BrowserSession:
     timeout_seconds: float = 300.0
     closed: bool = False
     navigations: list[str] = field(default_factory=list)
+    # Replaced wholesale by every browser_snapshot call (see
+    # pi_runtime.browser.snapshot) — a ref only resolves against the
+    # most recent snapshot, on purpose (spec section 27).
+    ref_map: dict[str, RefTarget] = field(default_factory=dict)
 
     def touch(self) -> None:
         self.last_used_at = time.time()

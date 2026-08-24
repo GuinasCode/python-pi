@@ -47,11 +47,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from pi_runtime.browser.session import BrowserSession
+from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError, capture_snapshot, resolve_locator
 from pi_runtime.research import Evidence
 from pi_runtime.tools import PolicyEngine
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, Playwright
+    from playwright.async_api import Browser, Locator, Playwright
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _BODY_TEXT_EXCERPT_CHARS = 500
@@ -194,10 +195,48 @@ class BrowserManager:
             return NavigationResult(session_id=session_id, url=url, ok=False, error=str(exc))
 
         session.navigations.append(url)
+        session.ref_map.clear()  # any refs from before this navigation are no longer valid
         evidence = await _page_to_evidence(page, url)
         return NavigationResult(
             session_id=session_id, url=url, ok=True, evidence=evidence, page_id=session.active_page_id
         )
+
+    async def snapshot(self, session_id: str, *, page_id: str | None = None) -> PageSnapshot:
+        """Spec section 26: a bounded accessibility-tree representation,
+        never raw HTML. Replaces the session's ref map wholesale — refs
+        from a previous snapshot stop resolving after this call."""
+        session = self._require_open_session(session_id)
+        page = session.get_page(page_id)
+        if page is None:
+            raise ValueError(f"session {session_id!r} has no page {page_id!r}")
+        target_page_id = page_id if page_id is not None else session.active_page_id
+        assert target_page_id is not None
+
+        page_snapshot, ref_map = await capture_snapshot(page, page_id=target_page_id)
+        session.ref_map = ref_map
+        session.touch()
+        return page_snapshot
+
+    def resolve_ref(self, session_id: str, ref: str) -> Locator:
+        """Spec section 27's invariant: an unknown or stale ref fails
+        clearly (`StaleRefError`), never silently resolves to a
+        different element."""
+        session = self._require_open_session(session_id)
+        target = session.ref_map.get(ref)
+        if target is None:
+            raise StaleRefError(f"ref {ref!r} is not from the most recent snapshot of session {session_id!r}")
+        page = session.get_page(target.page_id)
+        if page is None:
+            raise StaleRefError(f"ref {ref!r} refers to a page that is no longer open")
+        return resolve_locator(page, target)
+
+    def _require_open_session(self, session_id: str) -> BrowserSession:
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise ValueError(f"no such browser session: {session_id!r}")
+        if session.closed:
+            raise ValueError(f"browser session {session_id!r} is closed")
+        return session
 
 
 async def _page_to_evidence(page: Any, requested_url: str) -> Evidence:
