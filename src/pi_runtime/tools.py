@@ -190,6 +190,17 @@ DEFAULT_TOOL_SPECS: list[ToolSpec] = [
         confirmation_required=True,
         output_contract="stdout/stderr and exit code",
     ),
+    ToolSpec(
+        name="execute_code",
+        description="Run a Python script as a subprocess, with an allowlisted RPC bridge back to a subset of tools.",
+        capabilities=["shell.execute"],
+        side_effects=["arbitrary_execution"],
+        risk=Risk.HIGH,
+        idempotent=False,
+        environment_requirements=["shell"],
+        confirmation_required=True,
+        output_contract="bounded stdout/stderr preview, exit code, and an artifacts directory",
+    ),
 ]
 
 

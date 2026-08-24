@@ -1,13 +1,15 @@
-"""CodeExecutor — Slice A1: code -> subprocess -> bounded stdout -> result.
+"""CodeExecutor — code -> subprocess -> bounded stdout -> result.
 
 Runs a Python snippet as a real child process (this interpreter,
 `sys.executable`, matching the pattern pi_coding_agent.subagent.runner
 already uses for subagent children — same interpreter, same venv, no
-`pi`-on-PATH requirement). No RPC yet (Slice A2); no policy/budget
-enforcement yet (Slice A4) — this slice's own job is exactly "code runs,
-output never explodes the parent's memory or the model's context,
-timeout/cancellation work, exit code is captured", nothing more.
-"""
+`pi`-on-PATH requirement).
+
+Slice A4 wires this into the shared runtime's PolicyEngine/Budget rather
+than inventing execute_code-local versions of either (see
+pi_runtime.execute_code.security for why, and for the honest limits of
+the `mode="strict"`/`mode="project"` filesystem story — this is
+best-effort exposure reduction, not a sandbox)."""
 
 from __future__ import annotations
 
@@ -17,12 +19,19 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pi_runtime.execute_code.capture import BoundedStreamCapture
 from pi_runtime.execute_code.result import ExecuteCodeResult, ExecutionStatus, OutputCapture
 from pi_runtime.execute_code.rpc import RpcHandler, RpcServer
+from pi_runtime.execute_code.security import minimal_environment, wrap_handlers_with_policy
+from pi_runtime.tools import PolicyEngine, PolicyViolation
+
+if TYPE_CHECKING:
+    from pi_runtime.state import Budget
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
+_EXECUTE_CODE_POLICY_NAME = "execute_code"
 
 
 class InvalidCodeError(ValueError):
@@ -52,18 +61,49 @@ class CodeExecutor:
         env: dict[str, str] | None = None,
         rpc_handlers: dict[str, RpcHandler] | None = None,
         max_rpc_calls: int | None = None,
+        policy_engine: PolicyEngine | None = None,
+        budget: Budget | None = None,
     ) -> ExecuteCodeResult:
         execution_id = uuid.uuid4().hex[:12]
         artifacts_dir = self._artifacts_root / execution_id
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         (artifacts_dir / "script.py").write_text(code, encoding="utf-8")
 
+        empty = OutputCapture(preview="", truncated=False, total_bytes=0, total_lines=0, artifact_path=None, sha256="")
+
+        if policy_engine is not None:
+            try:
+                policy_engine.evaluate(_EXECUTE_CODE_POLICY_NAME)
+            except PolicyViolation as exc:
+                return ExecuteCodeResult(
+                    status=ExecutionStatus.POLICY_DENIED,
+                    exit_code=None,
+                    duration_ms=0.0,
+                    stdout=empty,
+                    stderr=empty,
+                    mode=mode,
+                    error_message=str(exc),
+                    artifacts_dir=str(artifacts_dir),
+                )
+
+        if budget is not None:
+            reason = budget.exceeded()
+            if reason is not None:
+                return ExecuteCodeResult(
+                    status=ExecutionStatus.RESOURCE_LIMIT,
+                    exit_code=None,
+                    duration_ms=0.0,
+                    stdout=empty,
+                    stderr=empty,
+                    mode=mode,
+                    error_message=f"budget exceeded before execution started: {reason}",
+                    artifacts_dir=str(artifacts_dir),
+                )
+            budget.record_usage(tool_calls=1)
+
         try:
             _validate_syntax(code)
         except InvalidCodeError as exc:
-            empty = OutputCapture(
-                preview="", truncated=False, total_bytes=0, total_lines=0, artifact_path=None, sha256=""
-            )
             return ExecuteCodeResult(
                 status=ExecutionStatus.INVALID_CODE,
                 exit_code=None,
@@ -75,6 +115,12 @@ class CodeExecutor:
                 artifacts_dir=str(artifacts_dir),
             )
 
+        effective_handlers = (
+            wrap_handlers_with_policy(rpc_handlers, policy_engine=policy_engine, budget=budget)
+            if rpc_handlers
+            else rpc_handlers
+        )
+
         return await self._run_subprocess(
             code,
             timeout=timeout,
@@ -82,7 +128,7 @@ class CodeExecutor:
             cwd=cwd,
             env=env,
             artifacts_dir=artifacts_dir,
-            rpc_handlers=rpc_handlers,
+            rpc_handlers=effective_handlers,
             max_rpc_calls=max_rpc_calls,
         )
 
@@ -102,7 +148,25 @@ class CodeExecutor:
         import sys
 
         rpc_server: RpcServer | None = None
-        child_env = dict(env) if env is not None else dict(os.environ)
+        # mode="strict" (default): minimal env, throwaway cwd inside this
+        # execution's own artifacts dir — reduces default exposure but is
+        # NOT a sandbox (see pi_runtime.execute_code.security's module
+        # docstring: absolute paths and os.chdir still escape it).
+        # mode="project": explicit opt-in to the real project cwd/env.
+        # An explicitly-passed cwd/env always wins over either default.
+        if env is not None:
+            child_env = dict(env)
+        elif mode == "project":
+            child_env = dict(os.environ)
+        else:
+            child_env = minimal_environment()
+
+        effective_cwd = cwd
+        if effective_cwd is None and mode != "project":
+            sandbox_dir = artifacts_dir / "sandbox"
+            sandbox_dir.mkdir(parents=True, exist_ok=True)
+            effective_cwd = str(sandbox_dir)
+
         if rpc_handlers:
             rpc_server = RpcServer(handlers=rpc_handlers, max_calls=max_rpc_calls)
             port = await rpc_server.start()
@@ -114,7 +178,7 @@ class CodeExecutor:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             str(artifacts_dir / "script.py"),
-            cwd=cwd,
+            cwd=effective_cwd,
             env=child_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
