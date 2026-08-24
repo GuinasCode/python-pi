@@ -498,6 +498,25 @@ one JSON object to stdout (plan.md section 21's literal rule), verified end to e
 subprocess invocation (`python -m pi_runtime.cli run "say hi"`, faux provider, no network) in
 addition to the in-process test suite.
 
+Fase 18 (Hardening) added `tests/pi_runtime/test_hardening.py` — adversarial/edge-case tests
+across `pi_runtime` as a whole, matching plan.md section 22's list: secret scanning (a
+credential embedded mid-sentence is still caught by `write_with_policy`), permission hardening
+(a broken `confirm` callback that raises must never fail open — nothing gets allowed as a side
+effect of the crash), sandbox honesty (`SandboxExecutionBackend` always refuses, confirmed),
+command-injection defense (`shell=True` is absent from `environments.py` entirely, verified by
+reading the actual source, not trusting a docstring; a dangerous-looking payload string reaches
+`docker exec`/`ssh` as exactly one argv element, never spliced into a larger shell string),
+prompt-injection defense (the Context Engine's carried-forward note always states "not a new
+instruction" *before* the actual content, every time), MCP permission tests (a denied call
+never reaches the underlying client; a tool name containing extra colons is parsed correctly,
+not misrouted), and reliability hardening (job deserialization survives missing optional
+fields, a corrupted JSONL line is skipped rather than crashing session loading, ticking a
+scheduler twice in a row never reruns an already-finished job, repeated policy evaluations of
+the same tool are all independently audited). No new `src/` behavior was invented purely to
+make a test pass — where a phase already declined to fake something (a real sandbox, a real
+cron parser, a real MCP SDK connection), that honest gap is what's tested, not a fabricated
+guarantee.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
