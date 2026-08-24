@@ -26,6 +26,15 @@ class SessionEntry:
 
 
 @dataclass
+class SessionSearchResult:
+    """One hit from SessionManager.search_sessions()."""
+
+    info: SessionInfo
+    score: int
+    snippet: str
+
+
+@dataclass
 class SessionInfo:
     """Metadata about a session."""
 
@@ -149,6 +158,76 @@ class SessionManager:
                 continue
         return entries
 
+    def search_sessions(self, query: str, *, limit: int = 20) -> list[SessionSearchResult]:
+        """Deterministic full-text search over every stored session.
+
+        No separate index/database — this re-reads each session's JSONL
+        file directly (the same source of truth list_sessions() reads),
+        so results can never drift out of sync with what's actually on
+        disk. That's the right tradeoff at personal-CLI scale (tens to a
+        few hundred sessions); it would need real indexing to stay fast
+        at a much larger scale.
+
+        A session matches when every whitespace-split, lowercased word in
+        `query` appears as a substring somewhere in its searchable text
+        (name, cwd, and every user/assistant message's text) — plain AND
+        matching, not fuzzy/semantic. Ranked by total match count, ties
+        broken by most-recently-updated first.
+        """
+        words = [w for w in query.lower().split() if w]
+        if not words:
+            return []
+
+        results: list[SessionSearchResult] = []
+        for file_path in sorted(self._session_dir.glob("*.jsonl")):
+            session_id = file_path.stem
+            info = self.open_session(session_id)
+            if info is None:
+                continue
+
+            haystack_parts = [info.name or "", info.cwd]
+            snippet = ""
+            for entry in self.get_entries(session_id):
+                if entry.kind != "message":
+                    continue
+                text = _extract_entry_text(entry.data)
+                if not text:
+                    continue
+                haystack_parts.append(text)
+                if not snippet and any(w in text.lower() for w in words):
+                    snippet = text.strip()
+
+            haystack = "\n".join(haystack_parts).lower()
+            if not all(w in haystack for w in words):
+                continue
+
+            score = sum(haystack.count(w) for w in words)
+            results.append(
+                SessionSearchResult(
+                    info=info,
+                    score=score,
+                    snippet=_truncate(snippet or info.name or info.cwd, 120),
+                )
+            )
+
+        results.sort(key=lambda r: (r.score, r.info.updated_at), reverse=True)
+        return results[:limit]
+
+    def resolve_session_ref(self, ref: str) -> SessionInfo | None:
+        """Resolve a session id or id-prefix to its SessionInfo.
+
+        An exact id match always wins. Otherwise there must be exactly one
+        session whose id starts with `ref` — zero or multiple prefix
+        matches both return None (callers that need to tell "not found"
+        apart from "ambiguous" for a better error message can re-scan
+        list_sessions() themselves; that distinction isn't needed by the
+        resolve-and-use call sites this exists for)."""
+        exact = self.open_session(ref)
+        if exact is not None:
+            return exact
+        matches = [s for s in self.list_sessions() if s.id.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
     def continue_recent(self) -> SessionInfo | None:
         """Get the most recently updated session."""
         sessions = self.list_sessions()
@@ -167,3 +246,30 @@ class SessionManager:
 
     def _session_file(self, session_id: str) -> Path:
         return self._session_dir / f"{session_id}.jsonl"
+
+
+def _extract_entry_text(data: dict[str, Any]) -> str:
+    """Plain-text content of one message entry's `data`, for search — same
+    shape InteractiveSession._persist_message() writes: `content` is
+    either a raw string (user messages) or a list of typed blocks
+    (assistant messages: text/thinking/tool_use; tool results: text)."""
+    content = data.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict):
+            if "text" in block:
+                parts.append(str(block["text"]))
+            elif "thinking" in block:
+                parts.append(str(block["thinking"]))
+    return " ".join(parts)
+
+
+def _truncate(text: str, max_len: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"

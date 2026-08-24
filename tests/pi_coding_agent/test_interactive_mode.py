@@ -15,7 +15,7 @@ from rich.console import Console
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
 from pi_coding_agent.interactive_mode import InteractiveSession
-from pi_coding_agent.session_manager import SessionManager
+from pi_coding_agent.session_manager import SessionEntry, SessionManager
 from pi_memory.store import MemoryType
 
 
@@ -853,6 +853,118 @@ class TestPromptHistory:
 
         asyncio.run(session.repl_loop())
         assert session._prompt_history == ["/clear", "hello there"]
+
+
+class TestSessionCommand:
+    def test_show_default_reports_current_session(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/session"))
+        assert any(session._session_id in p for p in printed if session._session_id)
+
+    def test_list_with_no_query_lists_sessions(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        mgr = session._session_manager
+        assert mgr is not None
+        other = mgr.create_session(cwd=str(tmp_path), name="other-session")
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/session list"))
+        assert any(other.id in p for p in printed)
+        assert any(session._session_id in p for p in printed if session._session_id)
+
+    def test_list_with_query_searches(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        mgr = session._session_manager
+        assert mgr is not None
+        target = mgr.create_session(cwd=str(tmp_path), name="refactor-auth")
+        mgr.append_entry(
+            target.id,
+            SessionEntry(seq=0, parent_seq=None, kind="message", data={"role": "user", "content": "fix the login bug"}),
+        )
+        mgr.create_session(cwd=str(tmp_path), name="unrelated-topic")
+
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/session list refactor"))
+        assert any(target.id in p for p in printed)
+        assert not any("unrelated-topic" in p for p in printed)
+
+    def test_list_query_with_no_matches_reports_nothing_found(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/session list nonexistent-topic-xyz"))
+        assert any("no sessions match" in p for p in printed)
+
+    def test_resume_switches_active_session_and_restores_transcript(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        mgr = session._session_manager
+        assert mgr is not None
+        original_id = session._session_id
+        target = mgr.create_session(cwd=str(tmp_path), name="past-chat")
+        mgr.append_entry(
+            target.id,
+            SessionEntry(seq=0, parent_seq=None, kind="message", data={"role": "user", "content": "hello from the past"}),
+        )
+
+        asyncio.run(session._handle_command(f"/session resume {target.id}"))
+        assert session._session_id == target.id
+        assert session._session_id != original_id
+        assert session._message_count == 1
+        assert len(session._agent_session._messages) == 1
+
+    def test_resume_by_unambiguous_prefix(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        mgr = session._session_manager
+        assert mgr is not None
+        target = mgr.create_session(cwd=str(tmp_path), name="past-chat")
+
+        asyncio.run(session._handle_command(f"/session resume {target.id[:6]}"))
+        assert session._session_id == target.id
+
+    def test_resume_unknown_id_does_not_switch(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        original_id = session._session_id
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command("/session resume doesnotexist"))
+        assert session._session_id == original_id
+        assert any("no such session" in p for p in printed)
+
+    def test_resume_without_id_shows_usage(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        original_id = session._session_id
+        asyncio.run(session._handle_command("/session resume"))
+        assert session._session_id == original_id
+
+    def test_resume_same_session_is_a_noop(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        original_id = session._session_id
+        assert original_id is not None
+        printed: list[str] = []
+        session._output.print = lambda markup="", **_: printed.append(markup)  # type: ignore[method-assign]
+        asyncio.run(session._handle_command(f"/session resume {original_id}"))
+        assert any("already the active session" in p for p in printed)
+
+    def test_resume_leaves_original_session_file_untouched(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        mgr = session._session_manager
+        assert mgr is not None
+        original_id = session._session_id
+        assert original_id is not None
+        original_entries_before = mgr.get_entries(original_id)
+
+        target = mgr.create_session(cwd=str(tmp_path), name="past-chat")
+        asyncio.run(session._handle_command(f"/session resume {target.id}"))
+
+        assert mgr.get_entries(original_id) == original_entries_before
+
+    def test_unknown_subcommand_does_not_raise(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        asyncio.run(session._handle_command("/session bogus"))
 
 
 class TestSoulCommand:

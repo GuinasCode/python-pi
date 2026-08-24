@@ -78,6 +78,10 @@ class TestParseArgs:
         result = parse_args(["--session-id", "abc123"])
         assert result.session_id == "abc123"
 
+    def test_session(self) -> None:
+        result = parse_args(["--session", "abc123"])
+        assert result.session == "abc123"
+
     def test_tools(self) -> None:
         result = parse_args(["--tools", "read,write,bash"])
         assert result.tools == ["read", "write", "bash"]

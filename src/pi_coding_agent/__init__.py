@@ -252,7 +252,7 @@ Options:
   -p, --print             Print mode (non-interactive)
       --mode MODE         Output mode: {", ".join(VALID_MODES)}
   -c, --continue          Continue most recent session
-  -r, --resume            Resume a session
+  -r, --resume            Resume most recent session (same as --continue)
       --provider NAME     LLM provider
       --model NAME        Model name
       --api-key KEY       API key
@@ -261,8 +261,8 @@ Options:
       --thinking LEVEL    Thinking level: {", ".join(VALID_THINKING_LEVELS)}
   -n, --name NAME         Session name
       --no-session        Skip session creation
-      --session NAME      Session name
-      --session-id ID     Session ID
+      --session ID        Resume a specific session by ID or ID prefix
+      --session-id ID     Session ID (used with --export)
       --fork ID           Fork from session
       --session-dir DIR   Session directory
       --models LIST       Comma-separated model list

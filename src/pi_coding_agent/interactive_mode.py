@@ -14,6 +14,7 @@ import os
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,7 @@ from pi_coding_agent.permission_mode import (
     permission_mode_label,
 )
 from pi_coding_agent.resource_loader import load_resources
-from pi_coding_agent.session_manager import SessionEntry, SessionManager
+from pi_coding_agent.session_manager import SessionEntry, SessionInfo, SessionManager
 from pi_coding_agent.styles import DIM_STYLE, PASTEL_BLUE, PASTEL_GREEN, PASTEL_RED, PASTEL_YELLOW, PI_THEME
 from pi_memory import MemoryStore, MemoryType
 from pi_tui.raw_input import read_line_with_cycle
@@ -610,6 +611,86 @@ class InteractiveSession:
             saved += 1
             self._output.print(f"[{PASTEL_GREEN}]saved[/{PASTEL_GREEN}] soul #{record.id}")
         self._output.print(f"[dim]done — {saved} principle(s) saved. Use /soul any time to review.[/dim]")
+
+    async def _handle_session_command(self, args_text: str) -> None:
+        """/session [show|list|resume] — show is the default (unchanged
+        behavior). `list [query]` lists recent sessions, or searches every
+        stored session (SessionManager.search_sessions) when a query is
+        given. `resume <id-or-prefix>` switches the REPL's active session
+        at runtime: the current session's file is left untouched on disk
+        (still fully replayable later), the in-memory transcript is
+        replaced with the target session's via the same
+        _restore_persisted_messages() path startup uses, and all further
+        turns persist into the target session from then on."""
+        parts = args_text.split(maxsplit=1)
+        sub = parts[0].lower() if parts else "show"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "show":
+            if self._session_id:
+                self._output.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
+            else:
+                self._output.print("[dim]no active session[/dim]")
+            return
+
+        if self._session_manager is None:
+            self._output.print("[dim]session management is disabled (--no-session)[/dim]")
+            return
+
+        if sub == "list":
+            if rest:
+                results = self._session_manager.search_sessions(rest)
+                if not results:
+                    self._output.print(f"[dim]no sessions match {escape(rest)!r}[/dim]")
+                    return
+                for r in results:
+                    self._print_session_row(r.info, snippet=r.snippet)
+            else:
+                sessions = self._session_manager.list_sessions()
+                if not sessions:
+                    self._output.print("[dim]no sessions yet.[/dim]")
+                    return
+                for info in sessions[:20]:
+                    self._print_session_row(info)
+            return
+
+        if sub == "resume":
+            if not rest:
+                self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /session resume <id-or-prefix>")
+                return
+            target = self._session_manager.resolve_session_ref(rest)
+            if target is None:
+                candidates = [s for s in self._session_manager.list_sessions() if s.id.startswith(rest)]
+                if len(candidates) > 1:
+                    ids = ", ".join(c.id for c in candidates[:5])
+                    self._output.print(f"[{PASTEL_RED}]ambiguous id prefix[/{PASTEL_RED}] {escape(rest)}: {ids}")
+                else:
+                    self._output.print(f"[{PASTEL_RED}]no such session:[/{PASTEL_RED}] {escape(rest)}")
+                return
+            if target.id == self._session_id:
+                self._output.print("[dim]already the active session[/dim]")
+                return
+            self._session_id = target.id
+            self._agent_session._messages = []
+            self._message_count = 0
+            self._restore_persisted_messages()
+            self._output.print(
+                f"[{PASTEL_GREEN}]resumed[/{PASTEL_GREEN}] session [dim]{target.id}[/dim] "
+                f"({escape(target.name or target.cwd)}) — {self._message_count} message(s)"
+            )
+            return
+
+        self._output.print(f"[{PASTEL_RED}]unknown /session subcommand:[/{PASTEL_RED}] {escape(sub)}")
+
+    def _print_session_row(self, info: SessionInfo, *, snippet: str | None = None) -> None:
+        when = datetime.fromtimestamp(info.updated_at / 1000).strftime("%Y-%m-%d %H:%M")
+        label = escape(info.name or "(unnamed)")
+        self._output.print(
+            f"  [{PASTEL_BLUE}]{info.id}[/{PASTEL_BLUE}]  {label}  [dim]{when} · "
+            f"{info.message_count} msg · {escape(info.cwd)}[/dim]"
+        )
+        if snippet:
+            self._output.print(f"      [dim]{escape(snippet)}[/dim]")
 
     def _restore_persisted_messages(self) -> None:
         if not self._session_manager or not self._session_id:
@@ -1222,7 +1303,8 @@ class InteractiveSession:
                 f"  [{PASTEL_BLUE}]/model[/{PASTEL_BLUE}]    Interactive model picker; /model <id> to switch directly\n"
                 f"  [{PASTEL_BLUE}]/clear[/{PASTEL_BLUE}]    Clear conversation history\n"
                 f"  [{PASTEL_BLUE}]/tools[/{PASTEL_BLUE}]    List available tools\n"
-                f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
+                f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info "
+                "(list [query] / resume <id>)\n"
                 f"  [{PASTEL_BLUE}]/extensions[/{PASTEL_BLUE}]  List loaded extensions and load errors\n"
                 f"  [{PASTEL_BLUE}]/soul[/{PASTEL_BLUE}]     Show/manage permanent principles "
                 "(add/edit/remove/clear/audit)\n"
@@ -1322,11 +1404,9 @@ class InteractiveSession:
                 self._output.print(f"  [{PASTEL_BLUE}]{tool.name}[/{PASTEL_BLUE}]: {tool.description}")
             return True
 
-        if cmd == "/session":
-            if self._session_id:
-                self._output.print(f"Session ID: [dim]{self._session_id}[/dim]\nMessages:   {self._message_count}")
-            else:
-                self._output.print("[dim]no active session[/dim]")
+        if cmd == "/session" or cmd.startswith("/session "):
+            args_text = command[len("/session") :].strip()
+            await self._handle_session_command(args_text)
             return True
 
         if cmd == "/soul" or cmd.startswith("/soul "):
@@ -1374,7 +1454,15 @@ async def run_interactive_mode(args: Args) -> int:
     session_mgr = SessionManager(session_dir)
 
     session_id = None
-    if args.continue_session or args.resume:
+    if args.session:
+        target = session_mgr.resolve_session_ref(args.session)
+        if target:
+            session_id = target.id
+            _console.print(f"[dim]resuming session: {target.id} ({target.name or target.cwd})[/dim]")
+        else:
+            _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] no session matches --session {args.session!r}")
+            return 1
+    elif args.continue_session or args.resume:
         recent = session_mgr.continue_recent()
         if recent:
             session_id = recent.id

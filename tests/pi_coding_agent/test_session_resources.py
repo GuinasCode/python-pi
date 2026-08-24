@@ -82,6 +82,147 @@ class TestSessionManager:
         assert forked_entries[0].data["text"] == "hello"
 
 
+def _add_user_message(mgr: SessionManager, session_id: str, text: str, *, seq: int = 0) -> None:
+    mgr.append_entry(
+        session_id,
+        SessionEntry(seq=seq, parent_seq=None, kind="message", data={"role": "user", "content": text}),
+    )
+
+
+def _add_assistant_message(mgr: SessionManager, session_id: str, text: str, *, seq: int = 1) -> None:
+    mgr.append_entry(
+        session_id,
+        SessionEntry(
+            seq=seq,
+            parent_seq=seq - 1,
+            kind="message",
+            data={"role": "assistant", "content": [{"type": "text", "text": text}]},
+        ),
+    )
+
+
+class TestSessionSearch:
+    def test_empty_query_returns_nothing(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        mgr.create_session(name="a")
+        assert mgr.search_sessions("") == []
+        assert mgr.search_sessions("   ") == []
+
+    def test_no_sessions_returns_nothing(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        assert mgr.search_sessions("anything") == []
+
+    def test_matches_by_session_name(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="refactor-auth")
+        mgr.create_session(name="unrelated")
+        results = mgr.search_sessions("refactor")
+        assert [r.info.id for r in results] == [info.id]
+
+    def test_matches_by_cwd(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(cwd="/home/user/projects/pi-cli", name="x")
+        mgr.create_session(cwd="/home/user/projects/other", name="y")
+        results = mgr.search_sessions("pi-cli")
+        assert [r.info.id for r in results] == [info.id]
+
+    def test_matches_by_message_content(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="chat")
+        _add_user_message(mgr, info.id, "how do I refactor the auth middleware?")
+        results = mgr.search_sessions("middleware")
+        assert [r.info.id for r in results] == [info.id]
+
+    def test_matches_assistant_text_blocks(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="chat")
+        _add_assistant_message(mgr, info.id, "Use sqlite-vec for hybrid search.")
+        results = mgr.search_sessions("sqlite-vec")
+        assert [r.info.id for r in results] == [info.id]
+
+    def test_multiple_words_require_all_to_match(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        both = mgr.create_session(name="chat")
+        _add_user_message(mgr, both.id, "refactor the auth middleware please")
+        only_one = mgr.create_session(name="chat2")
+        _add_user_message(mgr, only_one.id, "refactor the database layer")
+        results = mgr.search_sessions("refactor auth")
+        assert [r.info.id for r in results] == [both.id]
+
+    def test_case_insensitive(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="Refactor AUTH")
+        results = mgr.search_sessions("refactor auth")
+        assert [r.info.id for r in results] == [info.id]
+
+    def test_no_match_returns_empty(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        mgr.create_session(name="chat")
+        assert mgr.search_sessions("nonexistent-topic-xyz") == []
+
+    def test_ranked_by_match_count_then_recency(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        weak = mgr.create_session(name="weak")
+        _add_user_message(mgr, weak.id, "auth")
+        strong = mgr.create_session(name="strong")
+        _add_user_message(mgr, strong.id, "auth auth auth auth")
+        results = mgr.search_sessions("auth")
+        assert [r.info.id for r in results] == [strong.id, weak.id]
+
+    def test_result_includes_snippet(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="chat")
+        _add_user_message(mgr, info.id, "please refactor the auth middleware")
+        results = mgr.search_sessions("middleware")
+        assert results[0].snippet
+        assert "middleware" in results[0].snippet.lower()
+
+    def test_limit_caps_results(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        for i in range(5):
+            mgr.create_session(name=f"auth-session-{i}")
+        results = mgr.search_sessions("auth", limit=2)
+        assert len(results) == 2
+
+
+class TestResolveSessionRef:
+    def test_exact_id_match(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="a")
+        resolved = mgr.resolve_session_ref(info.id)
+        assert resolved is not None
+        assert resolved.id == info.id
+
+    def test_unambiguous_prefix_match(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        info = mgr.create_session(name="a")
+        resolved = mgr.resolve_session_ref(info.id[:4])
+        assert resolved is not None
+        assert resolved.id == info.id
+
+    def test_ambiguous_prefix_returns_none(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        # Force two ids sharing a prefix by writing session files directly
+        # under controlled names rather than relying on random uuids to
+        # collide.
+        (tmp_path / "abc111111111.jsonl").write_text(
+            '{"type": "session_info", "id": "abc111111111", "name": "one", "cwd": "/", '
+            '"created_at": 1, "updated_at": 1}\n',
+            encoding="utf-8",
+        )
+        (tmp_path / "abc222222222.jsonl").write_text(
+            '{"type": "session_info", "id": "abc222222222", "name": "two", "cwd": "/", '
+            '"created_at": 2, "updated_at": 2}\n',
+            encoding="utf-8",
+        )
+        assert mgr.resolve_session_ref("abc") is None
+
+    def test_no_match_returns_none(self, tmp_path: Path) -> None:
+        mgr = SessionManager(tmp_path)
+        mgr.create_session(name="a")
+        assert mgr.resolve_session_ref("doesnotexist") is None
+
+
 class TestResourceLoader:
     def test_load_project_context_files(self, tmp_path: Path) -> None:
         agents_file = tmp_path / "AGENTS.md"
