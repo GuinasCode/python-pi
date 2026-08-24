@@ -21,6 +21,7 @@ class InteractionStatus(str, Enum):
     STALE_REF = "stale_ref"
     NOT_FOUND = "not_found"
     TIMEOUT = "timeout"
+    POLICY_DENIED = "policy_denied"
     ERROR = "error"
 
 

@@ -13,10 +13,12 @@ from pi_runtime.browser.interactions import InteractionResult, InteractionStatus
 from pi_runtime.browser.manager import BrowserManager, NavigationResult
 from pi_runtime.browser.session import BrowserSession
 from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError
+from pi_runtime.browser.telemetry import BrowserTelemetryRecord
 
 __all__ = [
     "BrowserManager",
     "BrowserSession",
+    "BrowserTelemetryRecord",
     "DownloadResult",
     "EvaluateResult",
     "InteractionResult",

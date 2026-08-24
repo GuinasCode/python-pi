@@ -53,11 +53,14 @@ from pi_runtime.browser.evaluate import EvaluateResult, bound_evaluate_result
 from pi_runtime.browser.interactions import InteractionResult, InteractionStatus, classify_playwright_error
 from pi_runtime.browser.session import BrowserSession
 from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError, capture_snapshot, resolve_locator
+from pi_runtime.browser.telemetry import BrowserTelemetryRecord, redact_typed_value
 from pi_runtime.research import Evidence
-from pi_runtime.tools import PolicyEngine
+from pi_runtime.tools import PolicyEngine, PolicyViolation
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, Locator, Playwright
+
+    from pi_runtime.browser.telemetry import BrowserTelemetrySink
 
 _DEFAULT_ACTION_TIMEOUT_SECONDS = 5.0
 
@@ -98,10 +101,12 @@ class BrowserManager:
         policy_engine: PolicyEngine | None = None,
         default_timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         headless: bool = True,
+        telemetry_sink: BrowserTelemetrySink | None = None,
     ) -> None:
         self._policy_engine = policy_engine
         self._default_timeout_seconds = default_timeout_seconds
         self._headless = headless
+        self._telemetry_sink = telemetry_sink
         self._sessions: dict[str, BrowserSession] = {}
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
@@ -112,6 +117,52 @@ class BrowserManager:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.close_all()
 
+    def _emit(
+        self,
+        *,
+        session_id: str,
+        action: str,
+        status: str,
+        duration_ms: float,
+        page_id: str | None = None,
+        target: str | None = None,
+        error: str | None = None,
+        url_before: str | None = None,
+        url_after: str | None = None,
+        artifact_refs: list[str] | None = None,
+    ) -> None:
+        if self._telemetry_sink is None:
+            return
+        self._telemetry_sink(
+            BrowserTelemetryRecord(
+                session_id=session_id,
+                action=action,
+                status=status,
+                duration_ms=duration_ms,
+                page_id=page_id,
+                target=target,
+                error=error,
+                url_before=url_before,
+                url_after=url_after,
+                artifact_refs=artifact_refs or [],
+            )
+        )
+
+    def _check_policy(self, tool_name: str) -> str | None:
+        """Returns an error message if policy denies the action, else
+        None. Never raises — every caller converts this into its own
+        typed "denied" outcome instead of propagating PolicyViolation,
+        so a policy denial looks like any other reported failure, not a
+        crash (same failure-isolation invariant as the rest of this
+        module)."""
+        if self._policy_engine is None:
+            return None
+        try:
+            self._policy_engine.evaluate(tool_name)
+        except PolicyViolation as exc:
+            return str(exc)
+        return None
+
     async def _ensure_browser(self) -> Browser:
         if self._browser is None:
             from playwright.async_api import async_playwright
@@ -120,11 +171,26 @@ class BrowserManager:
             self._browser = await self._playwright.chromium.launch(headless=self._headless)
         return self._browser
 
-    async def open_session(self, *, timeout_seconds: float | None = None) -> BrowserSession:
+    async def open_session(
+        self, *, timeout_seconds: float | None = None, storage_state_path: str | None = None
+    ) -> BrowserSession:
+        """`storage_state_path` (spec section 32's "persistent profile
+        opcional"): when given and the file exists, the new context
+        loads cookies/localStorage from it — otherwise the session is
+        fully ephemeral, the default. Nothing is written back
+        automatically; call `save_storage_state` explicitly when you
+        want this session's state persisted. Loading one goes through
+        the higher-risk "browser_persistent_profile" policy check, not
+        just "browser"."""
         if self._policy_engine is not None:
             self._policy_engine.evaluate("browser")
+            if storage_state_path is not None:
+                self._policy_engine.evaluate("browser_persistent_profile")
         browser = await self._ensure_browser()
-        context = await browser.new_context()
+        if storage_state_path is not None and Path(storage_state_path).exists():
+            context = await browser.new_context(storage_state=storage_state_path)
+        else:
+            context = await browser.new_context()
         session = BrowserSession(
             session_id=uuid.uuid4().hex[:8],
             context=context,
@@ -134,6 +200,12 @@ class BrowserManager:
         session.add_page(page)
         self._sessions[session.session_id] = session
         return session
+
+    async def save_storage_state(self, session_id: str, path: str) -> None:
+        """Explicit opt-in persistence — never automatic (spec section
+        32: "credentials not persisted unless explicitly enabled")."""
+        session = self._require_open_session(session_id)
+        await session.context.storage_state(path=path)
 
     def get_session(self, session_id: str) -> BrowserSession | None:
         return self._sessions.get(session_id)
@@ -190,20 +262,45 @@ class BrowserManager:
             await session.close()
             return NavigationResult(session_id=session_id, url=url, ok=False, error="browser session timed out")
 
+        denial = self._check_policy("browser_navigate")
+        if denial is not None:
+            return NavigationResult(session_id=session_id, url=url, ok=False, error=f"policy_denied: {denial}")
+
         session.touch()
         page = session.get_page()
         if page is None:
             return NavigationResult(session_id=session_id, url=url, ok=False, error="session has no active page")
 
+        url_before = page.url
+        started = time.monotonic()
         try:
             await page.goto(url, timeout=timeout * 1000, wait_until="load")
         except Exception as exc:
             session.navigations.append(url)
+            self._emit(
+                session_id=session_id,
+                action="navigate",
+                status="error",
+                duration_ms=(time.monotonic() - started) * 1000,
+                target=url,
+                error=str(exc),
+                url_before=url_before,
+            )
             return NavigationResult(session_id=session_id, url=url, ok=False, error=str(exc))
 
         session.navigations.append(url)
         session.ref_map.clear()  # any refs from before this navigation are no longer valid
         evidence = await _page_to_evidence(page, url)
+        self._emit(
+            session_id=session_id,
+            action="navigate",
+            status="success",
+            duration_ms=(time.monotonic() - started) * 1000,
+            page_id=session.active_page_id,
+            target=url,
+            url_before=url_before,
+            url_after=page.url,
+        )
         return NavigationResult(
             session_id=session_id, url=url, ok=True, evidence=evidence, page_id=session.active_page_id
         )
@@ -213,15 +310,27 @@ class BrowserManager:
         never raw HTML. Replaces the session's ref map wholesale — refs
         from a previous snapshot stop resolving after this call."""
         session = self._require_open_session(session_id)
+        denial = self._check_policy("browser_snapshot")
+        if denial is not None:
+            raise PermissionError(f"policy_denied: {denial}")
         page = session.get_page(page_id)
         if page is None:
             raise ValueError(f"session {session_id!r} has no page {page_id!r}")
         target_page_id = page_id if page_id is not None else session.active_page_id
         assert target_page_id is not None
 
+        started = time.monotonic()
         page_snapshot, ref_map = await capture_snapshot(page, page_id=target_page_id)
         session.ref_map = ref_map
         session.touch()
+        self._emit(
+            session_id=session_id,
+            action="snapshot",
+            status="success",
+            duration_ms=(time.monotonic() - started) * 1000,
+            page_id=target_page_id,
+            url_after=page_snapshot.url,
+        )
         return page_snapshot
 
     def resolve_ref(self, session_id: str, ref: str) -> Locator:
@@ -246,19 +355,66 @@ class BrowserManager:
         return session
 
     async def _run_ref_action(
-        self, session_id: str, ref: str, action: str, call: Callable[[Locator], Awaitable[object]]
+        self,
+        session_id: str,
+        ref: str,
+        action: str,
+        call: Callable[[Locator], Awaitable[object]],
+        *,
+        redacted_note: str | None = None,
     ) -> InteractionResult:
+        denial = self._check_policy(f"browser_{action}")
+        if denial is not None:
+            return InteractionResult(status=InteractionStatus.POLICY_DENIED, action=action, error=denial)
+
+        target_label = redacted_note if redacted_note is not None else ref
+        session = self._sessions.get(session_id)
+        started = time.monotonic()
         try:
             locator = self.resolve_ref(session_id, ref)
         except StaleRefError as exc:
+            self._emit(
+                session_id=session_id,
+                action=action,
+                status="stale_ref",
+                duration_ms=(time.monotonic() - started) * 1000,
+                target=target_label,
+                error=str(exc),
+            )
             return InteractionResult(status=InteractionStatus.STALE_REF, action=action, error=str(exc))
         except ValueError as exc:
+            self._emit(
+                session_id=session_id,
+                action=action,
+                status="not_found",
+                duration_ms=(time.monotonic() - started) * 1000,
+                target=target_label,
+                error=str(exc),
+            )
             return InteractionResult(status=InteractionStatus.NOT_FOUND, action=action, error=str(exc))
 
         try:
             await call(locator)
         except Exception as exc:
-            return InteractionResult(status=classify_playwright_error(exc), action=action, error=str(exc))
+            status = classify_playwright_error(exc)
+            self._emit(
+                session_id=session_id,
+                action=action,
+                status=status.value,
+                duration_ms=(time.monotonic() - started) * 1000,
+                target=target_label,
+                error=str(exc),
+            )
+            return InteractionResult(status=status, action=action, error=str(exc))
+
+        self._emit(
+            session_id=session_id,
+            action=action,
+            status="success",
+            duration_ms=(time.monotonic() - started) * 1000,
+            target=target_label,
+            page_id=session.active_page_id if session is not None else None,
+        )
         return InteractionResult(status=InteractionStatus.SUCCESS, action=action)
 
     async def click(
@@ -275,14 +431,22 @@ class BrowserManager:
         for a plain input/textarea/contenteditable value set, prefer
         `fill`, which is faster and doesn't rely on key-event handlers."""
         return await self._run_ref_action(
-            session_id, ref, "type", lambda locator: locator.press_sequentially(text, timeout=timeout * 1000)
+            session_id,
+            ref,
+            "type",
+            lambda locator: locator.press_sequentially(text, timeout=timeout * 1000),
+            redacted_note=redact_typed_value(text),
         )
 
     async def fill(
         self, session_id: str, ref: str, text: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
     ) -> InteractionResult:
         return await self._run_ref_action(
-            session_id, ref, "fill", lambda locator: locator.fill(text, timeout=timeout * 1000)
+            session_id,
+            ref,
+            "fill",
+            lambda locator: locator.fill(text, timeout=timeout * 1000),
+            redacted_note=redact_typed_value(text),
         )
 
     async def press(
@@ -332,6 +496,9 @@ class BrowserManager:
         """Spec section 30: wait on a real signal (URL substring, text
         appearing, load state) instead of an arbitrary sleep()."""
         session = self._require_open_session(session_id)
+        denial = self._check_policy("browser_wait")
+        if denial is not None:
+            return InteractionResult(status=InteractionStatus.POLICY_DENIED, action="wait", error=denial)
         page = session.get_page()
         if page is None:
             return InteractionResult(status=InteractionStatus.NOT_FOUND, action="wait", error="no active page")
@@ -365,6 +532,11 @@ class BrowserManager:
         import asyncio
 
         session = self._require_open_session(session_id)
+        denial = self._check_policy("browser_evaluate")
+        if denial is not None:
+            return EvaluateResult(
+                status=InteractionStatus.POLICY_DENIED, preview="", truncated=False, total_chars=0, error=denial
+            )
         page = session.get_page(page_id)
         if page is None:
             return EvaluateResult(status=InteractionStatus.NOT_FOUND, preview="", truncated=False, total_chars=0)
@@ -393,6 +565,9 @@ class BrowserManager:
         with provenance (path/filename/mime/size/sha256), rather than
         trusting anything the page claims about the file."""
         session = self._require_open_session(session_id)
+        denial = self._check_policy("browser_download")
+        if denial is not None:
+            return DownloadResult(ok=False, error=f"policy_denied: {denial}")
         page = session.get_page()
         if page is None:
             return DownloadResult(ok=False, error="no active page")
