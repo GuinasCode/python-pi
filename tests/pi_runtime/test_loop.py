@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pytest
+
 from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message
 from pi_ai.providers.faux import faux_provider as _faux_provider
@@ -137,6 +139,52 @@ class TestAgentRuntimeAcceptance:
         assert state.status == RunStatus.FAILED
         assert state.stop_reason == StopReason.ERROR
         assert "executor blew up" in (state.error_message or "")
+
+
+class TestPolicyEngineIntegration:
+    """PolicyEngine (Fase 3) is opt-in on Executor — these confirm it
+    actually blocks a step from running at all when a currently-active
+    tool is unregistered/denied, and that Executor without one behaves
+    exactly like Fase 1/2 (no policy check)."""
+
+    def test_no_policy_engine_means_no_check_at_all(self) -> None:
+        session = _make_session([faux_assistant_message("ok")])
+        from pi_runtime.state import AgentState
+
+        state = AgentState(goal=Goal(objective="x"))
+        step = PlanStep(objective="x", action="go")
+        result = asyncio.run(Executor().execute(step, session, state))
+        assert result.content  # ran normally, nothing blocked it
+
+    def test_policy_violation_prevents_the_step_from_running(self) -> None:
+        from pi_runtime.state import AgentState
+        from pi_runtime.tools import PolicyEngine, ToolRegistry
+
+        # A session built with real builtin tools (bash included) but a
+        # registry that only knows about "read" — bash is active on the
+        # session yet unregistered in the policy layer.
+        session = _make_session([faux_assistant_message("should never be reached")])
+        registry = ToolRegistry()
+        from pi_runtime.tools import Risk, ToolSpec
+
+        for name in session.get_active_tool_names():
+            if name != "bash":
+                registry.register(ToolSpec(name=name, risk=Risk.NONE))
+        policy_engine = PolicyEngine(registry)
+
+        executor = Executor(policy_engine=policy_engine)
+        state = AgentState(goal=Goal(objective="x"))
+        step = PlanStep(objective="x", action="go")
+
+        with pytest.raises(Exception, match="not registered"):
+            asyncio.run(executor.execute(step, session, state))
+
+        # and via AgentRuntime, this surfaces as an explicit stop reason,
+        # never an uncaught crash.
+        runtime = AgentRuntime(executor=Executor(policy_engine=policy_engine))
+        state2 = asyncio.run(runtime.run(Goal(objective="x"), session))
+        assert state2.stop_reason == StopReason.ERROR
+        assert state2.status == RunStatus.FAILED
 
 
 class TestContextEngineIntegration:

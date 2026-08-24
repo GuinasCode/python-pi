@@ -286,6 +286,21 @@ low-ranked conversational filler is trimmed under budget pressure. Its real cons
 so Fase 1's own single-turn behavior is unchanged. `AgentSession` gained a small public
 `get_messages()` accessor for this (previously only reachable via the private `_messages`).
 
+Fase 3 added `src/pi_runtime/tools.py`: `ToolSpec` (name/description/capabilities/side
+effects/risk/idempotency/timeout/cost hint/environment requirements/confirmation — plan.md
+3.4; `input_schema` is deliberately left to each tool's existing JSON schema in
+`agent_session.get_builtin_tools()` rather than duplicated), `ToolRegistry`, and
+`PolicyEngine` (validation -> risk-based ALLOW/ASK/DENY, ASK failing closed to DENY with no
+confirm callback). `default_registry()` classifies every existing builtin tool
+(read/grep/ls=none, webfetch=low, browser=medium, write/edit=medium+mutating,
+bash=high+mutating) — extending, not replacing, `permission_mode.MUTATING_TOOL_NAMES`'s
+existing notion of "dangerous", which stays exactly as-is for the CLI. Real consumer:
+`pi_runtime.loop.Executor`, given a `PolicyEngine`, validates every tool active on the
+session before a step runs at all — an unregistered tool, missing environment, or denied
+tool makes "tool não registrada não executa" literally true, propagating as
+`PolicyViolation` into `AgentRuntime`'s existing failure handling. Opt-in (`Executor()` with
+no `policy_engine` skips the check entirely, unchanged Fase 1/2 behavior).
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.

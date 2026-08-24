@@ -25,6 +25,7 @@ from pi_runtime.state import (
     StopReason,
     VerificationResult,
 )
+from pi_runtime.tools import PolicyEngine
 
 
 def _final_text(result: AssistantMessage) -> str:
@@ -62,14 +63,27 @@ class Executor:
     anything, queues it as steering context so AgentSession's own
     compaction can't silently drop it — a run with no accumulated state
     yet (the common single-turn case) renders nothing and behaves
-    exactly like Fase 1."""
+    exactly like Fase 1.
 
-    def __init__(self, *, context_engine: ContextEngine | None = None) -> None:
+    If given a PolicyEngine (Fase 3), every tool currently active on the
+    session is validated/evaluated *before* the step runs at all — an
+    unregistered tool, a missing required environment, or a DENY
+    decision raises PolicyViolation, which propagates out of execute()
+    into AgentRuntime's existing exception handling (state.status=FAILED,
+    stop_reason=ERROR). Without a PolicyEngine (the default), this check
+    is skipped entirely — Fase 1/2 behavior is unchanged."""
+
+    def __init__(
+        self, *, context_engine: ContextEngine | None = None, policy_engine: PolicyEngine | None = None
+    ) -> None:
         self._context_engine = context_engine or ContextEngine()
+        self._policy_engine = policy_engine
 
     async def execute(self, step: PlanStep, session: AgentSession, state: AgentState) -> AssistantMessage:
         step.attempts += 1
         step.status = StepStatus.RUNNING
+        if self._policy_engine is not None:
+            self._policy_engine.evaluate_active_tools(session.get_active_tool_names())
         context_note = self._context_engine.render_working_set_note(state, session.get_messages())
         if context_note:
             session.queue_steer_message(context_note)
