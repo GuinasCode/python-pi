@@ -54,6 +54,7 @@ build-backend = "hatchling.build"
 packages = [
     "src/pi_ai",
     "src/pi_agent_core",
+    "src/pi_runtime",
     "src/pi_tui",
     "src/pi_coding_agent",
     "src/pi_protocol",

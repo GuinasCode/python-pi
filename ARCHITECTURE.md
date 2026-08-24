@@ -260,6 +260,21 @@ Both commands should produce no output, unless an explicitly approved `legacy/` 
 - Generated model data: conversion must decide whether to keep generated JSON data or rewrite model generation scripts in Python.
 - Extension ecosystem: TypeScript extensions cannot run in a pure Python runtime unless fully redesigned. The no-shim rule means existing TS extensions must be converted or dropped with explicit approval; they cannot be silently bridged through Node.
 
+## `pi_runtime` — explicit-state agent runtime (research-first-runtime plan)
+
+Started on the `research-first-runtime` branch, following `PLAN.md`/`PROMPT.md` (not
+committed to the repo — see the branch history). Fase 1 added `src/pi_runtime/`: `Budget`,
+`Goal`, `Plan`/`PlanStep`, `AgentState`, `VerificationResult` (`state.py`) plus
+`Planner`/`Executor`/`Verifier`/`Replanner`/`AgentRuntime` (`loop.py`), implementing the
+`goal → plan → act → observe → verify → replan | finish` loop as a thin, testable layer
+*around* the existing `AgentSession` (`pi_coding_agent/agent_session.py`) — every actual
+model/tool call still goes through `AgentSession.prompt()`, unchanged. Fase 1's planner is
+deliberately a single-step passthrough (real multi-step decomposition is Fase 4's Research
+Engine); its verifier checks `stop_reason`/non-empty text, not content quality. Not yet
+wired into the CLI/TUI — later phases (Fase 17) do that once the runtime layer is stable.
+See `src/pi_runtime/__init__.py` for the contract summary and `tests/pi_runtime/` for the
+Fase 1 acceptance-criteria tests.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
