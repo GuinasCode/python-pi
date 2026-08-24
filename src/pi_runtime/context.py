@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pi_ai import AssistantMessage, TextContent, ToolResultMessage, UserMessage
+from pi_runtime.skills import SkillSelector
 from pi_runtime.state import AgentState
 
 # Sources that must survive compaction regardless of budget — never
@@ -60,22 +61,25 @@ def _message_text(message: Any) -> str:
 @dataclass
 class ContextEngine:
     """Assembles a token-budgeted working set from AgentState + the raw
-    conversation. Only builds items for sources that actually have a
-    producer today (goal/constraints from Goal, decisions/evidence/
-    unresolved_questions from AgentState, conversation from messages) —
-    plan.md's full source list also names skills/plan/tools/filesystem/
-    subagents, which don't have a real producer yet (no Skills system
-    until Fase 9, no filesystem-context tracking); adding items for
-    sources with nothing to feed them would violate Regra 1.2 (no real
-    consumer)."""
+    conversation (+ skills, Fase 9). Only builds items for sources that
+    actually have a producer today (goal/constraints from Goal,
+    decisions/evidence/unresolved_questions from AgentState, conversation
+    from messages, skills from a SkillSelector) — plan.md's full source
+    list also names plan/tools/filesystem/subagents, which still don't
+    have a real producer (no filesystem-context tracking, no per-subagent
+    context export); adding items for sources with nothing to feed them
+    would violate Regra 1.2 (no real consumer)."""
 
     chars_per_token: int = 4
     budget_tokens: int = 8000
+    skill_selector: SkillSelector | None = None
 
     def estimate_tokens(self, text: str) -> int:
         return max(1, len(text) // self.chars_per_token)
 
-    def collect_items(self, state: AgentState, messages: list[Any]) -> list[ContextItem]:
+    def collect_items(
+        self, state: AgentState, messages: list[Any], skills: list[Any] | None = None
+    ) -> list[ContextItem]:
         items: list[ContextItem] = []
 
         if state.goal is not None:
@@ -96,6 +100,21 @@ class ContextEngine:
         for evidence in state.evidence:
             items.append(ContextItem(content=f"EVIDENCE: {evidence}", source="evidence", priority=60, freshness=1.0))
 
+        if skills and state.goal is not None:
+            selector = self.skill_selector or SkillSelector()
+            for selection in selector.select(state.goal.objective, skills):
+                if not selection.selected:
+                    continue  # Fase 9: irrelevant skills never become context items at all
+                items.append(
+                    ContextItem(
+                        content=f"SKILL {selection.name}: {selection.description}",
+                        source="skill",
+                        priority=50,
+                        relevance=selection.score,
+                        freshness=1.0,
+                    )
+                )
+
         total = len(messages)
         for index, message in enumerate(messages):
             text = _message_text(message)
@@ -112,12 +131,15 @@ class ContextEngine:
     def rank(self, items: list[ContextItem]) -> list[ContextItem]:
         return sorted(items, key=lambda item: item.score(), reverse=True)
 
-    def assemble_working_set(self, state: AgentState, messages: list[Any]) -> list[ContextItem]:
+    def assemble_working_set(
+        self, state: AgentState, messages: list[Any], skills: list[Any] | None = None
+    ) -> list[ContextItem]:
         """Protected items (goal/constraint/decision/unresolved_question/
         evidence) always make it in, regardless of budget — only
-        conversational filler gets dropped once the budget is tight, and
-        it's dropped lowest-ranked (oldest/least-relevant) first."""
-        items = self.collect_items(state, messages)
+        conversational filler (and, if given, selected-but-lower-priority
+        skills) gets dropped once the budget is tight, lowest-ranked
+        (oldest/least-relevant) first."""
+        items = self.collect_items(state, messages, skills)
         protected = [item for item in items if item.source in _PROTECTED_SOURCES]
         compactable = self.rank([item for item in items if item.source not in _PROTECTED_SOURCES])
 

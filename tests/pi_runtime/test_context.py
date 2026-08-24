@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pi_ai import UserMessage
 from pi_runtime.context import ContextEngine, ContextItem
+from pi_runtime.skills import SkillSelector
 from pi_runtime.state import AgentState, Goal
 
 
@@ -116,3 +117,69 @@ class TestRenderWorkingSetNote:
         note = engine.render_working_set_note(state, [])
         assert note is not None
         assert "concurrent writers" in note
+
+
+class TestContextEngineSkillIntegration:
+    """Fase 9's real consumer: skills passed to collect_items()/
+    assemble_working_set() are selected via SkillSelector, not injected
+    wholesale — this is what "skills são carregadas sob demanda" and
+    "skills irrelevantes não entram no contexto" mean at the Context
+    Engine level."""
+
+    def test_no_skills_argument_behaves_exactly_like_before(self) -> None:
+        engine = ContextEngine()
+        state = AgentState(goal=Goal(objective="write a database migration"))
+        items = engine.collect_items(state, [])
+        assert not any(item.source == "skill" for item in items)
+
+    def test_relevant_skill_becomes_a_context_item(self) -> None:
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Skill:
+            name: str
+            description: str
+
+        engine = ContextEngine()
+        state = AgentState(goal=Goal(objective="write a database migration"))
+        skills = [_Skill(name="database-migrations", description="safe SQL migration guidance")]
+
+        items = engine.collect_items(state, [], skills)
+        skill_items = [item for item in items if item.source == "skill"]
+        assert len(skill_items) == 1
+        assert "database-migrations" in skill_items[0].content
+
+    def test_irrelevant_skill_never_becomes_a_context_item(self) -> None:
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Skill:
+            name: str
+            description: str
+
+        engine = ContextEngine(skill_selector=SkillSelector(top_k=1, min_score=0.3))
+        state = AgentState(goal=Goal(objective="write a database migration"))
+        skills = [
+            _Skill(name="database-migrations", description="safe SQL migration guidance"),
+            _Skill(name="poetry-writing", description="how to write a sonnet"),
+        ]
+
+        items = engine.collect_items(state, [], skills)
+        skill_items = [item for item in items if item.source == "skill"]
+        assert len(skill_items) == 1
+        assert "database-migrations" in skill_items[0].content
+
+    def test_skills_survive_into_the_working_set(self) -> None:
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Skill:
+            name: str
+            description: str
+
+        engine = ContextEngine()
+        state = AgentState(goal=Goal(objective="write a database migration"))
+        skills = [_Skill(name="database-migrations", description="safe SQL migration guidance")]
+
+        working_set = engine.assemble_working_set(state, [], skills)
+        assert any(item.source == "skill" for item in working_set)

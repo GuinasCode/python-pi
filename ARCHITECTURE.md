@@ -370,6 +370,22 @@ automaticamente sem diff/avaliação/rollback/provenance" is structural, not con
 `SkillCandidate` always carries a diff and `source_run_id`. `check_regression()` reuses
 `VerificationResult` (Fase 1) again rather than a second verification concept.
 
+Fase 9 added `src/pi_runtime/skills.py`: `SkillSelector`/`SkillUsageTracker`. Does not replace
+the existing `pi_coding_agent.resource_loader.Skill`/`load_skills` (SKILL.md discovery,
+already a working form of progressive disclosure — the system prompt only ever gets
+name+description, never the full body, which the model reads via the `read` tool only if it
+decides to) — the actual gap was that every discovered skill's name+description was *always*
+injected into the prompt regardless of relevance, with no record of what was selected or how
+it performed. `SkillSelector` scores relevance with the same deterministic keyword-overlap
+approach already used for Soul overlap detection (stopword-filtered, not a new
+embedding-based subsystem); only the top-`k` above `min_score` are marked selected.
+`SkillUsageTracker` is a plain in-memory selection/outcome log (persisting it into `pi_memory`
+is a natural follow-up, not required by this phase). Real consumer: `ContextEngine` (Fase 2)
+gained a `skills` parameter on `collect_items()`/`assemble_working_set()` — the "skills"
+source Fase 2 explicitly named but deferred (no selection mechanism existed then) is now
+real; omitting the parameter behaves exactly as before (verified — Fase 2's own tests pass
+untouched).
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
