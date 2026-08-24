@@ -7,8 +7,17 @@ hold a real Playwright BrowserContext/Page across multiple tool calls
 
 from __future__ import annotations
 
+from pi_runtime.browser.interactions import InteractionResult, InteractionStatus
 from pi_runtime.browser.manager import BrowserManager, NavigationResult
 from pi_runtime.browser.session import BrowserSession
 from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError
 
-__all__ = ["BrowserManager", "BrowserSession", "NavigationResult", "PageSnapshot", "StaleRefError"]
+__all__ = [
+    "BrowserManager",
+    "BrowserSession",
+    "InteractionResult",
+    "InteractionStatus",
+    "NavigationResult",
+    "PageSnapshot",
+    "StaleRefError",
+]

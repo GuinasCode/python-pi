@@ -44,8 +44,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from pi_runtime.browser.interactions import InteractionResult, InteractionStatus, classify_playwright_error
 from pi_runtime.browser.session import BrowserSession
 from pi_runtime.browser.snapshot import PageSnapshot, StaleRefError, capture_snapshot, resolve_locator
 from pi_runtime.research import Evidence
@@ -53,6 +55,8 @@ from pi_runtime.tools import PolicyEngine
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, Locator, Playwright
+
+_DEFAULT_ACTION_TIMEOUT_SECONDS = 5.0
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _BODY_TEXT_EXCERPT_CHARS = 500
@@ -237,6 +241,111 @@ class BrowserManager:
         if session.closed:
             raise ValueError(f"browser session {session_id!r} is closed")
         return session
+
+    async def _run_ref_action(
+        self, session_id: str, ref: str, action: str, call: Callable[[Locator], Awaitable[object]]
+    ) -> InteractionResult:
+        try:
+            locator = self.resolve_ref(session_id, ref)
+        except StaleRefError as exc:
+            return InteractionResult(status=InteractionStatus.STALE_REF, action=action, error=str(exc))
+        except ValueError as exc:
+            return InteractionResult(status=InteractionStatus.NOT_FOUND, action=action, error=str(exc))
+
+        try:
+            await call(locator)
+        except Exception as exc:
+            return InteractionResult(status=classify_playwright_error(exc), action=action, error=str(exc))
+        return InteractionResult(status=InteractionStatus.SUCCESS, action=action)
+
+    async def click(
+        self, session_id: str, ref: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
+    ) -> InteractionResult:
+        return await self._run_ref_action(
+            session_id, ref, "click", lambda locator: locator.click(timeout=timeout * 1000)
+        )
+
+    async def type_text(
+        self, session_id: str, ref: str, text: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
+    ) -> InteractionResult:
+        """Types character-by-character (dispatches real key events) —
+        for a plain input/textarea/contenteditable value set, prefer
+        `fill`, which is faster and doesn't rely on key-event handlers."""
+        return await self._run_ref_action(
+            session_id, ref, "type", lambda locator: locator.press_sequentially(text, timeout=timeout * 1000)
+        )
+
+    async def fill(
+        self, session_id: str, ref: str, text: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
+    ) -> InteractionResult:
+        return await self._run_ref_action(
+            session_id, ref, "fill", lambda locator: locator.fill(text, timeout=timeout * 1000)
+        )
+
+    async def press(
+        self, session_id: str, ref: str, key: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
+    ) -> InteractionResult:
+        """`key` is a Playwright key name/combo: "Enter", "Tab",
+        "Escape", "Control+A", etc."""
+        return await self._run_ref_action(
+            session_id, ref, "press", lambda locator: locator.press(key, timeout=timeout * 1000)
+        )
+
+    async def select_option(
+        self,
+        session_id: str,
+        ref: str,
+        *,
+        value: str | None = None,
+        label: str | None = None,
+        timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS,
+    ) -> InteractionResult:
+        if value is None and label is None:
+            return InteractionResult(status=InteractionStatus.ERROR, action="select", error="need value or label")
+
+        async def _select(locator: Locator) -> object:
+            if value is not None:
+                return await locator.select_option(value=value, timeout=timeout * 1000)
+            return await locator.select_option(label=label, timeout=timeout * 1000)
+
+        return await self._run_ref_action(session_id, ref, "select", _select)
+
+    async def scroll_into_view(
+        self, session_id: str, ref: str, *, timeout: float = _DEFAULT_ACTION_TIMEOUT_SECONDS
+    ) -> InteractionResult:
+        return await self._run_ref_action(
+            session_id, ref, "scroll", lambda locator: locator.scroll_into_view_if_needed(timeout=timeout * 1000)
+        )
+
+    async def wait_for(
+        self,
+        session_id: str,
+        *,
+        url_contains: str | None = None,
+        text: str | None = None,
+        load_state: str | None = None,
+        timeout: float = 30.0,
+    ) -> InteractionResult:
+        """Spec section 30: wait on a real signal (URL substring, text
+        appearing, load state) instead of an arbitrary sleep()."""
+        session = self._require_open_session(session_id)
+        page = session.get_page()
+        if page is None:
+            return InteractionResult(status=InteractionStatus.NOT_FOUND, action="wait", error="no active page")
+        try:
+            if url_contains is not None:
+                await page.wait_for_url(f"**{url_contains}**", timeout=timeout * 1000)
+            elif text is not None:
+                await page.get_by_text(text).first.wait_for(timeout=timeout * 1000)
+            elif load_state is not None:
+                await page.wait_for_load_state(load_state, timeout=timeout * 1000)  # type: ignore[arg-type]
+            else:
+                return InteractionResult(
+                    status=InteractionStatus.ERROR, action="wait", error="need url_contains, text, or load_state"
+                )
+        except Exception as exc:
+            return InteractionResult(status=classify_playwright_error(exc), action="wait", error=str(exc))
+        return InteractionResult(status=InteractionStatus.SUCCESS, action="wait")
 
 
 async def _page_to_evidence(page: Any, requested_url: str) -> Evidence:
