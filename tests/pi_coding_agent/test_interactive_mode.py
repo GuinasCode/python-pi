@@ -946,3 +946,155 @@ class TestSoulCommand:
     def test_unknown_subcommand_does_not_raise(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path)
         asyncio.run(session._handle_command("/soul bogus"))
+
+
+class TestSoulOverlapOnAdd:
+    def test_no_overlap_saves_normally_with_single_confirm(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        with patch("builtins.input", return_value="y"):
+            asyncio.run(session._handle_command("/soul add always separate requirements from assumptions"))
+        assert len(store.list_by_type(MemoryType.SOUL)) == 1
+
+    def test_overlap_keep_both_creates_second_record(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+
+        with patch("builtins.input", side_effect=["1", "y"]):
+            asyncio.run(session._handle_command("/soul add I prefer concise answers please"))
+        assert len(store.list_by_type(MemoryType.SOUL)) == 2
+
+    def test_overlap_replace_updates_existing_without_new_record(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        original = store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+
+        with patch("builtins.input", side_effect=["2"]):
+            asyncio.run(session._handle_command("/soul add I prefer very concise answers"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == original.id
+        assert records[0].content == "I prefer very concise answers"
+
+    def test_overlap_merge_uses_accepted_suggestion(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        original = store.write(type=MemoryType.SOUL, title="Be concise", content="Answer concisely.")
+
+        with patch("builtins.input", side_effect=["3", "y"]):
+            asyncio.run(session._handle_command("/soul add Answer very concisely please"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == original.id
+        assert "Answer concisely." in records[0].content
+        assert "Answer very concisely please" in records[0].content
+
+    def test_overlap_merge_declined_suggestion_prompts_for_typed_text(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        original = store.write(type=MemoryType.SOUL, title="Be concise", content="Answer concisely.")
+
+        with patch("builtins.input", side_effect=["3", "n", "Custom merged principle text"]):
+            asyncio.run(session._handle_command("/soul add Answer very concisely please"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == original.id
+        assert records[0].content == "Custom merged principle text"
+
+    def test_overlap_cancel_saves_nothing(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+
+        with patch("builtins.input", side_effect=["4"]):
+            asyncio.run(session._handle_command("/soul add I prefer concise answers please"))
+        assert len(store.list_by_type(MemoryType.SOUL)) == 1
+
+    def test_overlap_check_applies_to_onboarding_too(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        existing = store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+
+        # onboarding: 1st question answered with overlapping text -> "salvar?"
+        # confirmed -> overlap prompt appears -> choice "4" cancels that one
+        # question -> the remaining 3 onboarding questions are skipped (blank).
+        with patch(
+            "builtins.input",
+            side_effect=["I prefer concise answers please", "y", "4", "", "", ""],
+        ):
+            asyncio.run(session._soul_onboarding(store))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == existing.id
+
+
+class TestSoulAudit:
+    def test_fewer_than_two_principles_reports_nothing_to_audit(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="Answer concisely.")
+
+        with patch("builtins.input", side_effect=AssertionError("should not prompt")):
+            asyncio.run(session._handle_command("/soul audit"))
+
+    def test_no_overlap_among_existing_principles_reports_none_found(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="Answer concisely.")
+        store.write(type=MemoryType.SOUL, title="b", content="Always separate requirements from assumptions.")
+
+        with patch("builtins.input", side_effect=AssertionError("should not prompt")):
+            asyncio.run(session._handle_command("/soul audit"))
+
+    def test_overlap_found_keep_only_one_deletes_the_other(self, tmp_path: Path) -> None:
+        """list_by_type (and therefore _soul_audit's outer loop) iterates
+        newest-first, so the "record" being audited each time is the most
+        recently written of an overlapping pair — "keep only #record" keeps
+        that newer one."""
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="I prefer concise answers.")
+        newer = store.write(type=MemoryType.SOUL, title="b", content="I prefer concise answers always.")
+
+        with patch("builtins.input", side_effect=["2"]):
+            asyncio.run(session._handle_command("/soul audit"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == newer.id
+
+    def test_overlap_found_merge_consolidates_into_one_record(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="Answer concisely.")
+        newer = store.write(type=MemoryType.SOUL, title="b", content="Answer very concisely please.")
+
+        with patch("builtins.input", side_effect=["3", "y"]):
+            asyncio.run(session._handle_command("/soul audit"))
+        records = store.list_by_type(MemoryType.SOUL)
+        assert len(records) == 1
+        assert records[0].id == newer.id
+        assert "Answer concisely." in records[0].content
+        assert "Answer very concisely please." in records[0].content
+
+    def test_overlap_found_default_choice_keeps_both(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        store = session._agent_session._memory_store
+        assert store is not None
+        store.write(type=MemoryType.SOUL, title="a", content="I prefer concise answers.")
+        store.write(type=MemoryType.SOUL, title="b", content="I prefer concise answers always.")
+
+        with patch("builtins.input", side_effect=[""]):
+            asyncio.run(session._handle_command("/soul audit"))
+        assert len(store.list_by_type(MemoryType.SOUL)) == 2

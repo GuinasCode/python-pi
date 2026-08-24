@@ -261,6 +261,60 @@ class TestMemoryStoreSoul:
         store.close()
 
 
+class TestSoulOverlapDetection:
+    def test_no_matches_when_soul_is_empty(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        assert store.find_overlapping_soul("Prefer concise answers.") == []
+        store.close()
+
+    def test_finds_near_duplicate_text(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        original = store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+        matches = store.find_overlapping_soul("I prefer concise answers please.")
+        assert len(matches) == 1
+        assert matches[0][0].id == original.id
+        assert matches[0][1] > 0.6
+        store.close()
+
+    def test_no_match_for_unrelated_text(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+        assert store.find_overlapping_soul("Always separate requirements from assumptions.") == []
+        store.close()
+
+    def test_excludes_given_id(self) -> None:
+        """Editing an entry in place must not flag it as overlapping itself."""
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        record = store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+        matches = store.find_overlapping_soul("I prefer concise answers.", exclude_id=record.id)
+        assert matches == []
+        store.close()
+
+    def test_only_compares_against_soul_type(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        store.write(type=MemoryType.DECISION, title="Be concise", content="I prefer concise answers.")
+        assert store.find_overlapping_soul("I prefer concise answers.") == []
+        store.close()
+
+    def test_never_depends_on_embeddings(self) -> None:
+        """Deterministic text overlap must work with no vector search at all."""
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        assert store._vec_enabled is False or not store._embeddings.is_available()
+        store.write(type=MemoryType.SOUL, title="Be concise", content="I prefer concise answers.")
+        matches = store.find_overlapping_soul("I prefer concise answers now.")
+        assert len(matches) == 1
+        store.close()
+
+    def test_multiple_matches_sorted_by_ratio_descending(self) -> None:
+        store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())
+        store.write(type=MemoryType.SOUL, title="A", content="I prefer concise answers.")
+        store.write(type=MemoryType.SOUL, title="B", content="I prefer concise answers always.")
+        matches = store.find_overlapping_soul("I prefer concise answers.")
+        assert len(matches) == 2
+        assert matches[0][1] >= matches[1][1]
+        store.close()
+
+
 class TestSecretGuard:
     def test_refuses_openai_style_key_in_content(self) -> None:
         store = MemoryStore(":memory:", embeddings=UnavailableEmbeddingManager())

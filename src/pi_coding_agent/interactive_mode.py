@@ -93,6 +93,20 @@ def _derive_soul_title(text: str) -> str:
     return title or "Principle"
 
 
+def _suggest_soul_merge(old_text: str, new_text: str) -> str:
+    """Heuristic (non-LLM, deterministic) merge suggestion for two
+    overlapping Soul principles, offered as an editable starting point —
+    never applied without the user confirming or rewriting it. If one
+    text already contains the other, the longer one already says
+    everything; otherwise concatenate them as two clauses."""
+    old_norm, new_norm = old_text.strip(), new_text.strip()
+    if old_norm.lower() in new_norm.lower():
+        return new_norm
+    if new_norm.lower() in old_norm.lower():
+        return old_norm
+    return f"{old_norm} Além disso: {new_norm}"
+
+
 def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
     """Return a dim-styled preview of tool output."""
     if not text or not text.strip():
@@ -361,12 +375,80 @@ class InteractiveSession:
             return ""
         return answer.strip()
 
+    async def _soul_choice(self, prompt_text: str, options: dict[str, str], *, default: str) -> str:
+        """Read a numbered choice (blank input picks `default`); re-prompts
+        on an unrecognized answer instead of silently guessing."""
+        menu = "  ".join(f"[{key}] {label}" for key, label in options.items())
+        while True:
+            raw = await self._soul_read_line(f"{prompt_text}\n  {menu}")
+            if not raw:
+                return default
+            if raw in options:
+                return raw
+            self._output.print(f"[{PASTEL_RED}]escolha inválida:[/{PASTEL_RED}] {escape(raw)}")
+
+    async def _soul_resolve_overlap(
+        self, store: MemoryStore, candidate_title: str, candidate_content: str, *, exclude_id: int | None = None
+    ) -> bool:
+        """Deterministic overlap check (MemoryStore.find_overlapping_soul)
+        run before a NEW Soul principle is written. Surfaces the closest
+        existing match — reasoning is just showing both texts side by side,
+        not an LLM judgment call, so the trigger stays deterministic — and
+        lets the user decide. Returns True if the caller should proceed to
+        write candidate_title/candidate_content as a new record; False if
+        this function already resolved it (replaced/merged into the
+        existing record, or the user cancelled)."""
+        matches = store.find_overlapping_soul(candidate_content, exclude_id=exclude_id)
+        if not matches:
+            return True
+        record, ratio = matches[0]
+        self._output.print(
+            f"[{PASTEL_YELLOW}]possível sobreposição[/{PASTEL_YELLOW}] ({ratio:.0%} de similaridade textual) "
+            f"com o princípio existente #{record.id}:"
+        )
+        self._output.print(f"  existente: {escape(record.content)}")
+        self._output.print(f"  novo:      {escape(candidate_content)}")
+        choice = await self._soul_choice(
+            "o que fazer?",
+            {"1": "manter os dois", "2": "substituir o existente", "3": "mesclar", "4": "cancelar"},
+            default="1",
+        )
+        if choice == "2":
+            store.update(record.id, title=candidate_title, content=candidate_content)
+            self._output.print(f"[{PASTEL_GREEN}]substituído[/{PASTEL_GREEN}] soul #{record.id}")
+            return False
+        if choice == "3":
+            merged = await self._soul_prompt_merge(record.content, candidate_content)
+            if merged is None:
+                self._output.print("[dim]cancelado[/dim]")
+                return False
+            store.update(record.id, title=_derive_soul_title(merged), content=merged)
+            self._output.print(f"[{PASTEL_GREEN}]mesclado[/{PASTEL_GREEN}] em soul #{record.id}")
+            return False
+        if choice == "4":
+            self._output.print("[dim]cancelado[/dim]")
+            return False
+        return True  # "1" — keep both, proceed to write the new record
+
+    async def _soul_prompt_merge(self, old_text: str, new_text: str) -> str | None:
+        """Offer the heuristic merge suggestion, editable; None means the
+        user backed out entirely."""
+        suggestion = _suggest_soul_merge(old_text, new_text)
+        self._output.print(f'  sugestão de mesclagem: "{suggestion}"')
+        if await self._soul_yes_no("usar esta sugestão?"):
+            return suggestion
+        typed = await self._soul_read_line("digite o texto final mesclado (vazio para cancelar)")
+        return typed.strip() or None
+
     async def _handle_soul_command(self, args_text: str) -> None:
-        """/soul [show|add|edit|remove|clear] — direct, explicit management
-        of the user's own MemoryStore, type=soul. Explicit invocation of
-        this command IS the confirmation (unlike the model calling
-        `remember(type="soul")`, which is routed through _permission_gate's
-        real y/N prompt instead)."""
+        """/soul [show|add|edit|remove|clear|audit] — direct, explicit
+        management of the user's own MemoryStore, type=soul. Explicit
+        invocation of this command IS the confirmation (unlike the model
+        calling `remember(type="soul")`, which is routed through
+        _permission_gate's real y/N prompt instead). `add` and the
+        onboarding flow run a deterministic overlap check
+        (_soul_resolve_overlap) before writing; `audit` runs the same
+        check proactively across every already-saved principle."""
         store = self._agent_session._memory_store
         if store is None:
             self._output.print("[dim]memory is disabled — /soul is unavailable[/dim]")
@@ -394,6 +476,8 @@ class InteractiveSession:
                 self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /soul add <principle text>")
                 return
             title = _derive_soul_title(rest)
+            if not await self._soul_resolve_overlap(store, title, rest):
+                return
             self._output.print(f'About to save as a permanent principle: "{escape(rest)}"')
             if not await self._soul_yes_no("Confirm?"):
                 self._output.print("[dim]cancelled[/dim]")
@@ -438,7 +522,69 @@ class InteractiveSession:
             self._output.print(f"[{PASTEL_GREEN}]cleared[/{PASTEL_GREEN}] {len(records)} soul principle(s)")
             return
 
+        if sub == "audit":
+            await self._soul_audit(store)
+            return
+
         self._output.print(f"[{PASTEL_RED}]unknown /soul subcommand:[/{PASTEL_RED}] {escape(sub)}")
+
+    async def _soul_audit(self, store: MemoryStore) -> None:
+        """/soul audit — proactive, deterministic pairwise scan over every
+        already-saved Soul principle, for overlaps that crept in without
+        anyone noticing at write time (e.g. saved in different sessions).
+        Reuses the same MemoryStore.find_overlapping_soul detector as the
+        reactive check in _soul_resolve_overlap; no separate search system."""
+        records = store.list_by_type(MemoryType.SOUL)
+        if len(records) < 2:
+            self._output.print("[dim]menos de 2 princípios — nada para auditar.[/dim]")
+            return
+
+        shown_pairs: set[frozenset[int]] = set()
+        deleted: set[int] = set()
+        found_any = False
+        for record in records:
+            if record.id in deleted:
+                continue
+            matches = [
+                (other, ratio)
+                for other, ratio in store.find_overlapping_soul(record.content, exclude_id=record.id)
+                if other.id not in deleted and frozenset((record.id, other.id)) not in shown_pairs
+            ]
+            if not matches:
+                continue
+            other, ratio = matches[0]
+            shown_pairs.add(frozenset((record.id, other.id)))
+            found_any = True
+            self._output.print(
+                f"[{PASTEL_YELLOW}]sobreposição[/{PASTEL_YELLOW}] ({ratio:.0%} de similaridade textual) "
+                f"entre #{record.id} e #{other.id}:"
+            )
+            self._output.print(f"  #{record.id}: {escape(record.content)}")
+            self._output.print(f"  #{other.id}: {escape(other.content)}")
+            choice = await self._soul_choice(
+                "o que fazer?",
+                {"1": "manter os dois", "2": f"manter só #{record.id}", "3": "mesclar", "4": "pular"},
+                default="4",
+            )
+            if choice == "2":
+                store.delete(other.id)
+                deleted.add(other.id)
+                self._output.print(f"[{PASTEL_GREEN}]removido[/{PASTEL_GREEN}] soul #{other.id}")
+            elif choice == "3":
+                merged = await self._soul_prompt_merge(record.content, other.content)
+                if merged is None:
+                    self._output.print("[dim]pulado[/dim]")
+                    continue
+                store.update(record.id, title=_derive_soul_title(merged), content=merged)
+                store.delete(other.id)
+                deleted.add(other.id)
+                self._output.print(
+                    f"[{PASTEL_GREEN}]mesclado[/{PASTEL_GREEN}] em soul #{record.id}, #{other.id} removido"
+                )
+        if not found_any:
+            self._output.print("[dim]nenhuma sobreposição encontrada.[/dim]")
+        else:
+            self._output.print("[dim]auditoria concluída.[/dim]")
 
     async def _soul_onboarding(self, store: MemoryStore) -> None:
         """Iterative, one-question-at-a-time construction flow — never a
@@ -457,9 +603,10 @@ class InteractiveSession:
                 continue
             if not await self._soul_yes_no(f'Salvar como princípio permanente: "{answer}"?'):
                 continue
-            record = store.write(
-                type=MemoryType.SOUL, title=_derive_soul_title(answer), content=answer, source="soul_onboarding"
-            )
+            title = _derive_soul_title(answer)
+            if not await self._soul_resolve_overlap(store, title, answer):
+                continue
+            record = store.write(type=MemoryType.SOUL, title=title, content=answer, source="soul_onboarding")
             saved += 1
             self._output.print(f"[{PASTEL_GREEN}]saved[/{PASTEL_GREEN}] soul #{record.id}")
         self._output.print(f"[dim]done — {saved} principle(s) saved. Use /soul any time to review.[/dim]")
@@ -1078,7 +1225,7 @@ class InteractiveSession:
                 f"  [{PASTEL_BLUE}]/session[/{PASTEL_BLUE}]  Show session info\n"
                 f"  [{PASTEL_BLUE}]/extensions[/{PASTEL_BLUE}]  List loaded extensions and load errors\n"
                 f"  [{PASTEL_BLUE}]/soul[/{PASTEL_BLUE}]     Show/manage permanent principles "
-                "(add/edit/remove/clear)\n"
+                "(add/edit/remove/clear/audit)\n"
             )
             return True
 

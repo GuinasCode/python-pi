@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from difflib import SequenceMatcher
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -106,6 +107,13 @@ _SECRET_PATTERNS = [
 
 def _looks_like_secret(text: str) -> bool:
     return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+
+# Ratio threshold for find_overlapping_soul's difflib.SequenceMatcher check.
+# Deliberately more conservative (higher bar) than the embedding-based
+# _DUPLICATE_DISTANCE_THRESHOLD below: this has no semantic understanding at
+# all, so it only flags text that is *lexically* close enough that a human
+# would recognize it as the same principle restated.
+_SOUL_OVERLAP_RATIO_THRESHOLD = 0.6
 
 # L2 distance on the unit-normalized embeddings produced by EmbeddingManager.
 # For normalized vectors, L2^2 = 2 - 2*cos_sim, so distance <= 0.5 corresponds
@@ -345,6 +353,31 @@ class MemoryStore:
             return None
         return record, distance
 
+    def find_overlapping_soul(
+        self, content: str, *, exclude_id: int | None = None
+    ) -> list[tuple[MemoryRecord, float]]:
+        """Deterministic overlap check among existing Soul principles.
+
+        Unlike find_similar, this never depends on sqlite-vec or an
+        embedding model being available — it's a plain difflib text-ratio
+        comparison against every stored Soul record, restricted to
+        type=soul only. Used both reactively (before saving a new
+        principle) and proactively (a full pairwise scan via `/soul
+        audit`), so it must always work the same way regardless of
+        install-time optional dependencies. Returns matches at or above
+        _SOUL_OVERLAP_RATIO_THRESHOLD, highest ratio first.
+        """
+        candidate = _normalize_for_overlap(content)
+        matches: list[tuple[MemoryRecord, float]] = []
+        for record in self.list_by_type(MemoryType.SOUL):
+            if record.id == exclude_id:
+                continue
+            ratio = SequenceMatcher(None, candidate, _normalize_for_overlap(record.content)).ratio()
+            if ratio >= _SOUL_OVERLAP_RATIO_THRESHOLD:
+                matches.append((record, ratio))
+        matches.sort(key=lambda pair: pair[1], reverse=True)
+        return matches
+
     def update(self, memory_id: int, *, title: str, content: str) -> MemoryRecord | None:
         """Overwrite an existing memory's title/content in place (used to merge
         a would-be duplicate into the record the user chose to keep)."""
@@ -473,6 +506,10 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         updated_at=row["updated_at"],
         source=row["source"],
     )
+
+
+def _normalize_for_overlap(text: str) -> str:
+    return " ".join(text.lower().split())
 
 
 def _fts_escape(query: str) -> str:
