@@ -414,6 +414,20 @@ OS or a remote POSIX shell backend, without resolving against the local filesyst
 sandbox — a real OS-level sandbox is a substantial, platform-specific undertaking with nothing
 in this repo to build on yet, and faking a security boundary would be actively misleading.
 
+Fase 12 added `src/pi_runtime/sessions.py`: `RuntimeSessionStore`, `state_to_dict()`/
+`state_from_dict()`. Does not replace `SessionManager` (JSONL session store, already handles
+create/open/list/`fork_session`, reused unchanged) — the actual gap: `AgentState` (Fase 1) was
+never persisted into a session at all, only chat messages were. `state_to_dict()`/
+`state_from_dict()` round-trip every field including nested `Goal`/`Plan`/`PlanStep`/`Budget`/
+`VerificationResult` and enums through real JSON (`json.loads(json.dumps(...))` is asserted in
+the tests, matching what `SessionManager.append_entry` actually does), storing each snapshot
+as a `SessionEntry(kind="runtime_state")`. `resume()` is the acceptance criterion made literal:
+open the session plus its latest saved state in one call, no manual reconstruction. `fork()`
+delegates straight to `SessionManager.fork_session` (already copies every entry, runtime-state
+ones included, since it's kind-agnostic); `branch()` truncates a fork at a given `seq` for
+inspecting "what if we'd stopped at step N"; `replay()` returns the full ordered lineage of
+every snapshot, not just the latest.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
