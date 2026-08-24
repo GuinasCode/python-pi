@@ -517,6 +517,18 @@ make a test pass — where a phase already declined to fake something (a real sa
 cron parser, a real MCP SDK connection), that honest gap is what's tested, not a fabricated
 guarantee.
 
+Fase 19 (Benchmark contra Hermes) is `HERMES_BENCHMARK.md` at the repo root, not code. No real,
+executable Hermes Agent instance was available in this session to run a comparative benchmark
+against — plan.md's own rule ("nunca declarar 'melhor' sem evidência") means every capability
+row is honestly marked `partial` (real, tested implementation on our side; no comparative
+execution evidence against Hermes) rather than fabricating an `equivalent`/`better` badge. This
+closes the `research-first-runtime` plan's Fases 0-19: `src/pi_runtime/` now has 19 modules
+(`state`, `loop`, `context`, `tools`, `research`, `browser`, `delegation`, `memory`, `learning`,
+`skills`, `router`, `environments`, `sessions`, `mcp`, `scheduler`, `telemetry`, `evals`, `cli`)
+implementing the full `goal → plan → act → verify → replan | finish` loop around the
+pre-existing `AgentSession`/`pi_memory`/`pi_coding_agent.subagent` (never rewritten, always
+wrapped) — 1479 tests passing across the whole repository at the end of Fase 18.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
