@@ -342,6 +342,23 @@ into `DelegationOutcome.error`). Token/dollar cost tracking is a registered TODO
 1.5) — only wall-clock elapsed time is tracked today, since a child process's own usage
 doesn't flow back to the parent yet.
 
+Fase 7 added `src/pi_runtime/memory.py`: does not replace `pi_memory` — it's already a real,
+tested system (SQLite+FTS5+sqlite-vec hybrid search with automatic lexical fallback, secret
+detection, semantic + Soul-specific dedupe). Adds `CognitiveMemoryType`
+(Working/Episodic/Semantic/Procedural/User/Project, plan.md 11) mapped onto `pi_memory`'s
+existing `MemoryType` values — `PROCEDURAL -> SOUL` is the most meaningful mapping, since
+Soul is already documented as "stable, high-priority, low-churn principles", exactly what
+procedural memory means in cognitive-architecture terms. `WORKING` has no storage mapping at
+all (`write_with_policy` raises `WorkingMemoryNotPersistable`) — working memory is
+session-scoped and already lives on `AgentState.working_memory` (Fase 1); persisting it into
+`pi_memory` would blur "session scratch space" with "curated facts across sessions."
+`write_with_policy()` enforces "memória não deve ser registrada indiscriminadamente" via a
+confidence gate (write-time only — `confidence` isn't a stored `MemoryRecord` field, adding
+one would need a schema migration bigger than this slice needs) plus dedupe-before-write
+reusing `find_similar` unchanged; secret detection still runs, unchanged. `retrieve_ranked()`
+wraps `search()` (unchanged, still degrades to lexical without embeddings) with an explicit
+freshness score so a stale match doesn't dominate purely on text relevance.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
