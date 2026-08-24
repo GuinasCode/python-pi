@@ -401,6 +401,19 @@ retry are not reinvented — `pi_ai.models`'s `CredentialStore` and `nvidia_mode
 `nvidia/auto` fallback chain already cover those; this module's job is purely deciding which
 tier a task needs before either of them runs.
 
+Fase 11 added `src/pi_runtime/environments.py`: `ExecutionBackend` (cwd, command execution,
+file read/write, timeout, artifact access — plan.md 15) with `LocalExecutionBackend`
+(wraps the existing, already-tested `execute_bash`/`read_file`/`write_file` tools, unchanged),
+`DockerExecutionBackend`/`SshExecutionBackend` (real `docker exec`/`ssh` subprocess calls —
+genuine execution when the binary is on PATH, an explicit `CommandResult` reporting
+unavailability when it isn't, same pattern `browser_fetch_url` already uses for a missing
+Playwright install — never simulated). `normalize_path()` uses `posixpath` deliberately, not
+`pathlib.Path` (OS-dependent), so a path behaves identically for a local backend on any host
+OS or a remote POSIX shell backend, without resolving against the local filesystem.
+`SandboxExecutionBackend` is an explicit `NotImplementedError` (Regra 1.5) rather than a fake
+sandbox — a real OS-level sandbox is a substantial, platform-specific undertaking with nothing
+in this repo to build on yet, and faking a security boundary would be actively misleading.
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
