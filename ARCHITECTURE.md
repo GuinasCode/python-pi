@@ -314,6 +314,19 @@ refs, reusing `pi_runtime.state.VerificationResult` rather than a second verific
 Claim synthesis from evidence (needs a real LLM call) and a real search provider are explicit
 TODOs (Regra 1.5), not faked.
 
+Fase 5 added `src/pi_runtime/browser.py`: `BrowserManager`/`BrowserSessionInfo`/
+`NavigationResult`, wrapping the existing, already-tested `browser_fetch_url` tool with
+session bookkeeping (create/close/timeout), navigation history, `PolicyEngine` validation
+(opt-in, Fase 3), and page -> `Evidence` conversion (Fase 4). `browser_fetch_url` is a
+one-shot open->goto->extract->close call, not a persistent Playwright page kept alive across
+calls — real click/type/submit interaction needs exactly that, which nothing in this codebase
+has yet; building it is a real, separate lift, registered here as a TODO (Regra 1.5) rather
+than faked on top of the one-shot path. Session identity in this phase is therefore
+bookkeeping (id/timeout/history), not a genuinely persistent browser process. Failures (a
+missing Playwright install, a bad URL, an exception Playwright itself raises) never propagate
+out of `navigate()` — they become `NavigationResult.error`, satisfying "falhas não derrubam
+todo o agente" and "browser deve ser opcional".
+
 ## Initial Conclusion
 
 A complete conversion is feasible but is a large rewrite measured in many focused implementation passes. The safe path is incremental package conversion with tests and compatibility fixtures, not one-shot automated translation.
