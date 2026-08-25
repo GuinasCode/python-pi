@@ -1256,6 +1256,84 @@ class TestMidTurnInput:
 
         asyncio.run(_run())
 
+    def test_confirm_tool_gets_its_answer_from_the_live_mid_turn_reader(self, tmp_path: Path) -> None:
+        """Regression test for a real hang: a permission confirmation
+        (_confirm_tool) firing mid-turn used to *also* start its own
+        blocking input() concurrently with this same reader — two
+        blocking stdin reads at once, which on Windows (one global
+        console mode, not one per reader) could let the raw-mode reader
+        consume a keystroke input() was waiting for, so input() simply
+        never returned: the tool call, the turn, and the whole app hung.
+        Fixed by having the confirmation answer arrive through the
+        *same* already-running reader (self._pending_confirm_future)
+        instead of a second one. asyncio.wait_for's timeout here is what
+        actually proves the fix: if this regresses, _confirm_tool falls
+        into its blocking-input() fallback branch and the test fails
+        fast with a TimeoutError instead of hanging the whole suite."""
+        session = _make_session(tmp_path)
+        session._output.print = lambda markup="", **_: None  # type: ignore[method-assign]
+
+        async def _run() -> None:
+            confirm_result: list[bool] = []
+
+            async def _fake_turn() -> None:
+                # Real concurrency, not wall-clock timing: enough yields
+                # that _run_turn_accepting_mid_turn_input has definitely
+                # reached its first asyncio.wait (and so set
+                # self._mid_turn_reader_active = True) before this calls
+                # _confirm_tool — matches the real ordering, where the
+                # mid-turn reader is already running long before
+                # AgentSession's tool loop can reach a permission gate.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                confirm_result.append(await session._confirm_tool("bash", {"command": "ls"}))
+
+            read_calls = 0
+
+            async def _fake_read_live_line() -> str | None:
+                nonlocal read_calls
+                read_calls += 1
+                if read_calls == 1:
+                    # More yields than _fake_turn's own delay above, so
+                    # _confirm_tool has definitely registered
+                    # self._pending_confirm_future before "y" arrives —
+                    # otherwise it would arrive too early and get
+                    # (wrongly) routed to /steer instead of the confirm.
+                    for _ in range(10):
+                        await asyncio.sleep(0)
+                    return "y"
+                await asyncio.Event().wait()  # never set — blocks forever
+                return None
+
+            session._read_live_line = _fake_read_live_line  # type: ignore[method-assign]
+
+            turn_task: asyncio.Task[None] = asyncio.create_task(_fake_turn())
+            accept_task = asyncio.create_task(session._run_turn_accepting_mid_turn_input(turn_task))
+            await asyncio.wait_for(turn_task, timeout=2)
+            accept_task.cancel()
+
+            assert confirm_result == [True]
+            # Claimed by the pending confirm, never routed to /steer.
+            assert session._agent_session._pending_steer == []
+
+        asyncio.run(_run())
+
+    def test_confirm_tool_falls_back_to_plain_input_when_no_mid_turn_reader_is_live(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When _confirm_tool is reached outside
+        _run_turn_accepting_mid_turn_input (e.g. run_turn() awaited
+        directly, as tests elsewhere in this file do) there's no
+        competing reader to avoid — it must still work via a plain
+        input(), unchanged from before this fix."""
+        session = _make_session(tmp_path)
+        session._output.print = lambda markup="", **_: None  # type: ignore[method-assign]
+        assert session._mid_turn_reader_active is False
+
+        monkeypatch.setattr("builtins.input", lambda: "y")
+        result = asyncio.run(session._confirm_tool("bash", {"command": "ls"}))
+        assert result is True
+
 
 class TestPromptHistory:
     """Up/Down recalling prior submitted lines (pi_tui.raw_input's own

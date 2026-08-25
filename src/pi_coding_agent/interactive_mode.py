@@ -277,6 +277,22 @@ class InteractiveSession:
         # the user pressed Enter — reused as the next prompt's read instead
         # of starting a second, competing raw-mode stdin reader.
         self._pending_live_input_task: asyncio.Task[str | None] | None = None
+        # True exactly while _run_turn_accepting_mid_turn_input has a live
+        # background reader blocked on stdin (i.e. during any turn, unless
+        # stdin has already hit EOF) — _confirm_tool checks this to decide
+        # whether it's safe to call the stdlib's own blocking input() or
+        # whether doing so would start a *second* concurrent stdin reader.
+        # See _confirm_tool and _pending_confirm_future below for why that
+        # second reader was a real bug, not just a cosmetic one.
+        self._mid_turn_reader_active = False
+        # Set by _confirm_tool (mid-turn only — see _mid_turn_reader_active)
+        # while it's waiting for a y/N answer; resolved by
+        # _run_turn_accepting_mid_turn_input when the *existing* mid-turn
+        # reader delivers a submitted line, instead of routing that line to
+        # _handle_mid_turn_input (steer/stop). This is what lets the
+        # confirmation answer arrive through the one already-running raw-
+        # mode reader rather than a second, competing blocking input() call.
+        self._pending_confirm_future: asyncio.Future[str] | None = None
 
         # Where run_turn()/_handle_command() render to. Defaults to the
         # classic REPL's Console — the Textual app (--ui-mode fullscreen)
@@ -403,31 +419,48 @@ class InteractiveSession:
     async def _confirm_tool(self, tool_name: str, args: dict[str, Any]) -> bool:
         """Ask the user to approve a single mutating tool call (y/N).
 
-        Prints straight to `_console`, bypassing self._output/
-        FooterAwareOutputSink — so the live box is erased first and
-        redrawn after by hand here, same as the wrapped sink does for
-        every other print, just done directly since this call site needs
-        blocking input(), not just a print.
+        Always fires mid-turn (this is only ever reached through
+        AgentSession's tool-execution loop, i.e. from inside run_turn())
+        — which means _run_turn_accepting_mid_turn_input's own
+        background stdin reader is normally active for the whole
+        duration. This used to *also* run a second, independent blocking
+        input() concurrently with that reader — two blocking reads on
+        the same console at once, which on Windows (a single global
+        console mode, not one per reader) meant a keystroke could be
+        consumed entirely by the raw-mode reader and never reach input()
+        at all: input() then simply never returned, hanging the tool
+        call — and with it the whole turn, and the app, since everything
+        else here just awaits that same turn. Fixed by not starting a
+        second reader in the first place: when the mid-turn reader is
+        confirmed live (`self._mid_turn_reader_active`), the answer is
+        delivered by that same reader instead, via
+        `self._pending_confirm_future` — see
+        _run_turn_accepting_mid_turn_input, which resolves it instead of
+        routing the submitted line to /steer.
 
-        Known limitation: this can run concurrently with a mid-turn
-        /steer read (_run_turn_accepting_mid_turn_input's own background
-        stdin reader) if a tool confirmation happens to fire while the
-        user is actively typing — both are blocking reads on the same
-        stdin from different threads, and there's no coordination
-        between them beyond the terminal-write lock this method already
-        takes. In that narrow window a keystroke could be delivered to
-        the "wrong" reader. Not corruption of terminal *state* (the lock
-        still prevents interleaved writes), just a rare mis-routed key —
-        a real gap, not one this pass closes; documented rather than
-        silently ignored (spec: "não prometa isolamento que não
-        existe")."""
+        Falls back to a plain blocking input() only when no mid-turn
+        reader is actually live — e.g. run_turn() called directly
+        without going through _run_turn_accepting_mid_turn_input at all
+        (tests do this), where nothing else is reading stdin and the old
+        approach is perfectly safe."""
         args_str = _fmt_args(args)
-        self._box_before_output()
-        _console.print(
+        question = (
             f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] Allow [bold]{escape(tool_name)}[/bold]({args_str})? "
-            "[dim](y/N)[/dim]",
-            end=" ",
+            "[dim](y/N)[/dim]"
         )
+
+        if self._mid_turn_reader_active:
+            self._output.print(question)
+            future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            self._pending_confirm_future = future
+            try:
+                answer = await future
+            finally:
+                self._pending_confirm_future = None
+            return answer.strip().lower() in ("y", "yes")
+
+        self._box_before_output()
+        _console.print(question, end=" ")
         loop = asyncio.get_running_loop()
         try:
             answer = await loop.run_in_executor(None, input)
@@ -1450,19 +1483,40 @@ class InteractiveSession:
         """Runs alongside turn_task, concurrently reading more input
         lines through the same live box — anything submitted while the
         turn is still going is routed to _handle_mid_turn_input (steer/
-        stop) rather than starting a second, competing turn. Leaves
-        `self._pending_live_input_task` set to whatever read was still
-        in flight when the turn finished, so repl_loop's next prompt
-        reuses that same reader instead of starting a second, competing
-        one on the same stdin."""
+        stop), UNLESS a tool confirmation is currently waiting on an
+        answer (`self._pending_confirm_future`), in which case the
+        submitted line resolves *that* instead — see _confirm_tool.
+        Never starts a second, competing turn, and (as of the
+        confirm-routing above) never lets a second, competing stdin
+        reader exist either: a mid-turn permission-gate prompt used to
+        call the stdlib's own blocking input() concurrently with this
+        method's own reader, both trying to read the same console at
+        once — on Windows in particular, console mode is a single global
+        setting, so having a raw-mode reader (this method's) and a
+        cooked-mode input() call (the old _confirm_tool) both blocked on
+        the same handle at the same time meant a keystroke could be
+        consumed entirely by one and never reach the other; if the raw
+        reader "won" a keystroke input() needed, input() simply never
+        returned — the whole turn (and the app, since everything else
+        here is awaiting that same turn) hung forever. Routing the
+        answer through this method's own already-running reader removes
+        the second reader outright rather than trying to make two
+        concurrent blocking reads on one console coexist.
+
+        Leaves `self._pending_live_input_task` set to whatever read was
+        still in flight when the turn finished, so repl_loop's next
+        prompt reuses that same reader instead of starting a second,
+        competing one on the same stdin."""
         input_task: asyncio.Task[str | None] | None = asyncio.create_task(self._read_live_line())
         try:
             while True:
                 wait_set: set[asyncio.Task[Any]] = {turn_task}
                 if input_task is not None:
                     wait_set.add(input_task)
+                self._mid_turn_reader_active = input_task is not None
                 done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                 if turn_task in done:
+                    self._mid_turn_reader_active = False
                     self._pending_live_input_task = input_task if input_task not in done else None
                     return turn_task.result()
                 assert input_task is not None
@@ -1471,15 +1525,28 @@ class InteractiveSession:
                     # EOF mid-turn: wind the session down, but don't spawn
                     # another reader — stdin is gone, it would just EOF
                     # again immediately. Keep waiting on turn_task alone
-                    # until it actually finishes.
+                    # until it actually finishes. A pending confirm can't
+                    # ever get a real answer now either, so resolve it as
+                    # a decline rather than leaving it (and the turn)
+                    # hanging on a future nothing will ever set.
                     self._running = False
                     self._agent_session.request_stop()
+                    if self._pending_confirm_future is not None and not self._pending_confirm_future.done():
+                        self._pending_confirm_future.set_result("n")
                     input_task = None
                     continue
-                if submitted:
+                if self._pending_confirm_future is not None and not self._pending_confirm_future.done():
+                    # Ctrl+C makes _read_live_line return "" (see its own
+                    # handling) rather than None — still resolves the
+                    # pending confirm (as a decline) instead of falling
+                    # through to the `submitted:` truthiness check below
+                    # and leaving the confirm's future to hang forever.
+                    self._pending_confirm_future.set_result(submitted or "n")
+                elif submitted:
                     self._handle_mid_turn_input(submitted)
                 input_task = asyncio.create_task(self._read_live_line())
         except BaseException:
+            self._mid_turn_reader_active = False
             turn_task.cancel()
             raise
 
@@ -1552,7 +1619,7 @@ class InteractiveSession:
                 self._print_user_message(user_input)
                 self._status = "thinking..."
                 turn_task = asyncio.create_task(self.run_turn(user_input))
-                result = await self._run_turn_accepting_mid_turn_input(turn_task)
+                await self._run_turn_accepting_mid_turn_input(turn_task)
                 self._status = "ready"
                 self._output.print()
                 # No error print here: every provider failure already
