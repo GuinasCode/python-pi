@@ -48,25 +48,20 @@ class PermissionDecision(str, Enum):
 # always allowed.
 MUTATING_TOOL_NAMES = frozenset({"bash", "write", "edit"})
 
-# The subset of MUTATING_TOOL_NAMES that "accept edits" auto-approves
-# without asking — file edits specifically, not arbitrary shell commands.
-FILE_EDIT_TOOL_NAMES = frozenset({"write", "edit"})
-
 
 def permission_decision(mode: PermissionMode, tool_name: str) -> PermissionDecision:
     """Decide, before executing *tool_name*, whether *mode* allows it
     outright (ALLOW), must prompt the user (ASK), or blocks it (DENY).
 
     - plan mode: every mutating tool is DENYed (read-only by design).
-    - accept edits: file edits (write/edit) ALLOWed automatically; bash
-      still ASKs, since auto-running shell commands is a bigger blast
-      radius than auto-accepting a file diff.
+    - accept edits: every mutating tool (bash included) is ALLOWed
+      automatically — the whole point of the mode is to stop asking.
     - default: every mutating tool ASKs.
     """
     if tool_name not in MUTATING_TOOL_NAMES:
         return PermissionDecision.ALLOW
     if mode is PermissionMode.PLAN:
         return PermissionDecision.DENY
-    if mode is PermissionMode.ACCEPT_EDITS and tool_name in FILE_EDIT_TOOL_NAMES:
+    if mode is PermissionMode.ACCEPT_EDITS:
         return PermissionDecision.ALLOW
     return PermissionDecision.ASK

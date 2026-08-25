@@ -455,6 +455,13 @@ class TestPermissionGate:
             allowed = asyncio.run(session._permission_gate("edit", {"path": "x"}))
         assert allowed is True
 
+    def test_accept_edits_allows_bash_without_prompting(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        session._permission_mode = session._permission_mode.ACCEPT_EDITS
+        with patch("builtins.input", side_effect=AssertionError("should not prompt for bash in accept edits")):
+            allowed = asyncio.run(session._permission_gate("bash", {"command": "ls -la"}))
+        assert allowed is True
+
     def test_read_only_tools_never_prompt(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path)
         with patch("builtins.input", side_effect=AssertionError("should not prompt for read")):
@@ -464,8 +471,9 @@ class TestPermissionGate:
     def test_remember_soul_always_asks_even_in_accept_edits_mode(self, tmp_path: Path) -> None:
         """A confirm_soul-style second self-issued tool call is not real user
         confirmation — remember(type=soul) must route to a real y/N prompt,
-        unconditionally, not be silently ALLOWed just because the user
-        happens to be in acceptEdits mode (which is only about file edits)."""
+        unconditionally, not be silently ALLOWed just because the session
+        happens to be in acceptEdits mode (a hardcoded special case, not
+        governed by permission_decision's MUTATING_TOOL_NAMES logic)."""
         session = _make_session(tmp_path)
         session._permission_mode = session._permission_mode.ACCEPT_EDITS
         with patch("builtins.input", return_value="y") as mock_input:

@@ -45,7 +45,6 @@ class TestPermissionDecision:
         for tool in ("bash", "write", "edit"):
             assert permission_decision(PermissionMode.PLAN, tool) is PermissionDecision.DENY
 
-    def test_accept_edits_allows_file_edits_but_asks_for_bash(self) -> None:
-        assert permission_decision(PermissionMode.ACCEPT_EDITS, "write") is PermissionDecision.ALLOW
-        assert permission_decision(PermissionMode.ACCEPT_EDITS, "edit") is PermissionDecision.ALLOW
-        assert permission_decision(PermissionMode.ACCEPT_EDITS, "bash") is PermissionDecision.ASK
+    def test_accept_edits_allows_every_mutating_tool_including_bash(self) -> None:
+        for tool in ("bash", "write", "edit"):
+            assert permission_decision(PermissionMode.ACCEPT_EDITS, tool) is PermissionDecision.ALLOW
