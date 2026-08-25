@@ -1084,6 +1084,39 @@ class TestMidTurnFooterVisibility:
         assert "second line printed mid-turn" in rendered
         assert "shift+tab to cycle" not in rendered  # cleanly erased, not left behind
 
+    def test_end_empty_string_stream_is_not_fragmented_by_footer_redraws(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression test for thinking_delta's streaming pattern: many
+        print(delta, end="") calls meant to land on one continuous line.
+        Redrawing the footer after every individual fragment used to
+        insert a "\\r\\n" + footer block between each one — breaking the
+        line into pieces and, since the footer's own erase/redraw math
+        assumes it starts from a blank row a real newline would leave
+        (never true mid-fragment), corrupting the screen instead of the
+        stream advancing cleanly. The footer must stay off screen for
+        the whole fragment run and only reappear once a real end="\\n"
+        line closes it out."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=60, force_terminal=True))
+        session = _make_session(tmp_path)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._begin_turn_footer()
+        session._output.print("thinking", end="\n")
+        for chunk in ["Hel", "lo ", "wor", "ld,", " one", " line"]:
+            session._output.print(chunk, end="")
+        session._output.print()  # thinking_end's trailing bare print(), end="\n" default
+        session._end_turn_footer()
+
+        term = _VirtualTerminal()
+        term.feed(fake_stdout.getvalue())
+        rendered = term.rendered_text()
+        assert "Hello world, one line" in rendered
+        assert "shift+tab to cycle" not in rendered  # erased at the very end, not left behind
+
 
 class TestPromptHistory:
     """Up/Down recalling prior submitted lines (pi_tui.raw_input's own

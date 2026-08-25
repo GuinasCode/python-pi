@@ -59,16 +59,32 @@ class ConsoleOutputSink:
 
 class FooterAwareOutputSink:
     """Wraps another OutputSink, calling `before` immediately before
-    each print and `after` immediately after. The classic REPL uses
-    this to keep its status footer (session/mode info, pinned to the
-    bottom of the terminal) visible for the whole turn — thinking,
+    each print and (usually) `after` immediately after. The classic REPL
+    uses this to keep its status footer (session/mode info, pinned to
+    the bottom of the terminal) visible for the whole turn — thinking,
     streaming text, running tools — not just while the input box itself
     is on screen: `before` erases the footer so the new line lands where
     it would have anyway, `after` redraws it below whatever just
     printed, so the two never end up interleaved or duplicated on the
     screen. Both hooks are no-ops outside a turn (see
     InteractiveSession._footer_active), so slash-command output and
-    other non-turn prints are completely unaffected."""
+    other non-turn prints are completely unaffected.
+
+    `after` is skipped for a `print(..., end="")` call — a mid-line
+    fragment of a continuous stream (thinking_delta prints its content
+    token-by-token this way, all meant to land on one flowing line).
+    Redrawing the footer after each individual fragment would plant a
+    "\\r\\n" + footer block between them, breaking the stream into one
+    line per token instead of one continuous line and, since each
+    redraw's own leading newline never lines up with where the *next*
+    fragment actually needs to continue from, corrupting the screen
+    (fragments overwriting each other / the footer) instead of the
+    stream advancing cleanly. `before` still runs every time (so a
+    footer that's already on screen gets out of the way of the first
+    fragment) — it's naturally a no-op for every fragment after the
+    first, since erasing already left nothing on screen to erase again.
+    The footer reappears on the next `end="\\n"` call, once the
+    fragment run has actually finished a real line."""
 
     def __init__(self, inner: OutputSink, *, before: Callable[[], None], after: Callable[[], None]) -> None:
         self._inner = inner
@@ -78,7 +94,8 @@ class FooterAwareOutputSink:
     def print(self, markup: str = "", *, end: str = "\n") -> None:
         self._before()
         self._inner.print(markup, end=end)
-        self._after()
+        if end == "\n":
+            self._after()
 
     def print_renderable(self, renderable: RenderableType) -> None:
         self._before()
