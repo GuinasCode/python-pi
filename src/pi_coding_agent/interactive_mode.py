@@ -1086,7 +1086,21 @@ class InteractiveSession:
                 msg = getattr(err, "error_message", None) or "Unknown error"
             self._output.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(msg)}")
 
-        if self._on_status_change is not None:
+        # A full box redraw is real terminal I/O (erase + repaint every
+        # visible row) — firing it on *every* event, including
+        # thinking_delta/text_delta (one per streamed token, potentially
+        # dozens a second), repainted the input box dozens of times a
+        # second and was the actual source of the flicker this guards
+        # against now. Those two event types never touch self._status
+        # (see above — nothing they do assigns to it) and carry their own
+        # incremental echo via self._output.print(..., end=""), so
+        # skipping the footer refresh for just them loses no information
+        # the footer would have shown; every other event type (including
+        # "done"/"error", which must still refresh even when the status
+        # text happens to end up unchanged — e.g. a turn with no tool
+        # calls goes ready -> ready) keeps refreshing every time, same as
+        # before.
+        if self._on_status_change is not None and t not in ("thinking_delta", "text_delta"):
             self._on_status_change()
 
     async def run_turn(self, user_input: str) -> AssistantMessage | None:
