@@ -25,12 +25,36 @@ from pi_coding_agent.output_sink import ConsoleOutputSink, FooterAwareOutputSink
 from pi_coding_agent.permission_mode import PermissionMode
 from pi_coding_agent.prompt_editor import PromptTextArea
 from pi_coding_agent.session_manager import SessionManager
-from pi_coding_agent.tui_app import AppFooter, PiApp, _TranscriptSink
+from pi_coding_agent.tui_app import AppFooter, PiApp, TransientFooterContent, _TranscriptSink
 
 
 def _make_session(tmp_path: Path, responses: list[Any] | None = None) -> InteractiveSession:
     handle = faux_provider()
     handle.set_responses(responses or [faux_assistant_message("hello from tui")])
+    models = MutableModels()
+    models.set_provider(handle.provider)
+    model = handle.get_model()
+    assert model is not None
+    session_mgr = SessionManager(tmp_path / "sessions")
+    info = session_mgr.create_session(cwd=str(tmp_path), name="test")
+    return InteractiveSession(
+        models=models,
+        model=model,
+        cwd=str(tmp_path),
+        config_dir=tmp_path / ".pi",
+        session_manager=session_mgr,
+        session_id=info.id,
+    )
+
+
+def _make_multi_model_session(tmp_path: Path, model_ids: list[str]) -> InteractiveSession:
+    """Like _make_session, but with more than one model registered on the
+    same provider — the bare `/model` picker only shows its list at all
+    once there's an actual choice to make (a single-model provider gets
+    the short "only model available" note instead — see
+    PiApp._select_model_transient)."""
+    handle = faux_provider(models=[{"id": model_id, "name": model_id} for model_id in model_ids])
+    handle.set_responses([faux_assistant_message("ok") for _ in range(10)])
     models = MutableModels()
     models.set_provider(handle.provider)
     model = handle.get_model()
@@ -98,6 +122,39 @@ def _footer_screen_text(app: PiApp) -> str:
         "".join(segment.text for segment in footer.render_line(y)) for y in range(footer.outer_size.height)
     ]
     return "\n".join(lines)
+
+
+def _footer_compositor_lines(app: PiApp) -> list[str]:
+    """The footer's own on-screen rows exactly as the app's compositor
+    paints them — border included. ``Widget.render_line`` (used by
+    _footer_screen_text above) only ever returns the widget's *content*
+    area; border decoration is layered on afterwards by the compositor
+    (StylesCache.render_widget), so render_line can never see it — this
+    reads the same full-screen strips the real terminal frame is built
+    from (app.screen._compositor.render_strips()) and slices out just
+    the rows the footer's own region covers."""
+    footer = app.query_one("#app-footer", AppFooter)
+    region = footer.region
+    strips = app.screen._compositor.render_strips()
+    lines: list[str] = []
+    for y in range(region.y, region.y + region.height):
+        if 0 <= y < len(strips):
+            lines.append("".join(segment.text for segment in strips[y]))
+        else:
+            lines.append("")
+    return lines
+
+
+def _footer_has_both_borders(app: PiApp) -> bool:
+    """True if the footer's first and last on-screen rows (border
+    included — see _footer_compositor_lines) both contain a real
+    box-drawing border glyph."""
+    lines = _footer_compositor_lines(app)
+    if len(lines) < 2:
+        return False
+    border_chars = set("─│┌┐└┘")
+    top, bottom = lines[0], lines[-1]
+    return any(c in border_chars for c in top) and any(c in border_chars for c in bottom)
 
 
 async def _settle(app: PiApp, pilot: Pilot[None]) -> None:
@@ -972,6 +1029,226 @@ class TestAppFooter:
             input_widget.text = "still usable"
             await pilot.pause()
             assert input_widget.text == "still usable"
+
+
+class TestModelSelectorTransient:
+    """Second-iteration bugs: the bare `/model` picker's list is
+    transient interaction state, never persistent footer state — see
+    TransientFooterContent and PiApp._select_model_transient. Covers the
+    exact required sequence: MODEL_SELECTOR_OPEN -> show models ->
+    MODEL_SELECTED -> hide models -> switch model -> append "switched
+    to <model>" to transcript -> persistent footer remains visible."""
+
+    @pytest.mark.asyncio
+    async def test_model_list_is_hidden_before_and_after_selection(self, tmp_path: Path) -> None:
+        session = _make_multi_model_session(tmp_path, ["model-a", "model-b", "model-c"])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            transient = app.query_one("#transient-footer", TransientFooterContent)
+            assert transient.display is False
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/model"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert transient.display is True
+            assert transient.option_count == 3
+
+            await pilot.press("enter")  # pick whatever's highlighted (model-a)
+            await _settle(app, pilot)
+
+            # Gone immediately, not left behind — this is the exact bug
+            # report: "lista de modelos continua visível" after picking.
+            assert transient.display is False
+            assert transient.option_count == 0
+
+    @pytest.mark.asyncio
+    async def test_selecting_a_model_switches_it_and_logs_to_transcript_once(self, tmp_path: Path) -> None:
+        session = _make_multi_model_session(tmp_path, ["model-a", "model-b"])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            assert session._model.id == "model-a"
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/model"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            transient = app.query_one("#transient-footer", TransientFooterContent)
+            transient.highlighted = 1  # model-b
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert session._model.id == "model-b"
+            text = _transcript_text(app)
+            assert "switched to" in text
+            assert "model-b" in text
+            # Not duplicated as "models... models... switched to...".
+            assert text.count("switched to") == 1
+
+    @pytest.mark.asyncio
+    async def test_escape_cancels_without_switching_or_leaving_the_list_visible(self, tmp_path: Path) -> None:
+        session = _make_multi_model_session(tmp_path, ["model-a", "model-b"])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/model"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            transient = app.query_one("#transient-footer", TransientFooterContent)
+            assert transient.display is True
+
+            await pilot.press("escape")
+            await _settle(app, pilot)
+
+            assert transient.display is False
+            assert session._model.id == "model-a"  # unchanged
+            assert "switched to" not in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_persistent_footer_stays_visible_with_both_borders_throughout(self, tmp_path: Path) -> None:
+        """Teste de persistência: opening/closing the picker never touches
+        AppFooter's own visibility or borders — it's a separate widget
+        entirely (TransientFooterContent), not footer content."""
+        session = _make_multi_model_session(tmp_path, ["model-a", "model-b"])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            footer = app.query_one("#app-footer", AppFooter)
+            footer_identity = id(footer)
+            assert footer.display is True
+            assert _footer_has_both_borders(app)
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/model"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            # Model list open: footer is completely unaffected.
+            assert app.query_one("#app-footer", AppFooter) is footer
+            assert footer.display is True
+            assert _footer_has_both_borders(app)
+
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert id(app.query_one("#app-footer", AppFooter)) == footer_identity
+            assert footer.display is True
+            assert _footer_has_both_borders(app)
+            # And the status line now reflects the switched-to model.
+            assert "model-a" in _footer_screen_text(app)
+
+
+class TestFooterSurvivesStreaming:
+    """Second-iteration BUG 3: the footer container/visibility/borders
+    must never change during READY -> THINKING -> STREAMING -> TOOL ->
+    STREAMING -> READY. Sampled by wrapping PiApp._update_footer (the
+    exact hook InteractiveSession fires after every event during a turn
+    — see interactive_mode._handle_event's on_status_change call) so
+    every real status transition is observed deterministically, with no
+    sleeps/timers/polling."""
+
+    @pytest.mark.asyncio
+    async def test_footer_widget_identity_is_stable_across_a_full_turn(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path, [faux_assistant_message("hello from tui")])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer_id = id(app.query_one("#app-footer", AppFooter))
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "hi"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert id(app.query_one("#app-footer", AppFooter)) == footer_id
+
+    @pytest.mark.asyncio
+    async def test_footer_never_hides_or_loses_borders_across_ready_thinking_tool_streaming_ready(
+        self, tmp_path: Path
+    ) -> None:
+        from pi_ai import StopReason
+        from pi_ai.providers.faux import faux_tool_call
+
+        session = _make_session(
+            tmp_path,
+            [
+                faux_assistant_message(
+                    [faux_tool_call("read", {"path": "x.txt"})],
+                    stop_reason=StopReason.TOOL_USE,
+                ),
+                faux_assistant_message("final streamed response"),
+            ],
+        )
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer = app.query_one("#app-footer", AppFooter)
+            footer_identity = id(footer)
+            transcript = app.query_one("#transcript", VerticalScroll)
+            prompt = app.query_one("#prompt-input", PromptTextArea)
+
+            samples: list[tuple[bool, bool, bool]] = []
+            # Patched onto InteractiveSession, not PiApp: on_mount binds
+            # session._on_status_change = self._update_footer *once*,
+            # capturing that bound-method object — _handle_event later
+            # calls that already-captured reference directly on every
+            # event, so patching app._update_footer as a fresh instance
+            # attribute after mount would never actually intercept those
+            # calls (only code that looks up self._update_footer fresh
+            # each time, e.g. _handle_submission's own end-of-turn call,
+            # would see it). The session's hook is the one InteractiveSession
+            # genuinely fires after every event — see _handle_event's
+            # on_status_change call in interactive_mode.py.
+            original_on_status_change = session._on_status_change
+            assert original_on_status_change is not None
+
+            def _sampling_status_change() -> None:
+                original_on_status_change()
+                live_footer = app.query_one("#app-footer", AppFooter)
+                # Structural border check (styles.border, what CSS
+                # declared), not a pixel probe here: render_line reflects
+                # whatever the compositor's *last completed* layout pass
+                # painted, and this sampler runs synchronously mid-event
+                # (right when a status change fires), potentially before
+                # that pass has caught up with a just-changed content
+                # height — a timing artifact of probing off-cycle, not a
+                # real dropped border (Textual only ever paints a frame
+                # after a message batch fully settles, never mid-callback).
+                # The pixel-exact check (_footer_has_both_borders) is used
+                # instead for the pre/post assertions below, where an
+                # explicit pilot.pause()/_settle guarantees a stable,
+                # fully-composited frame to inspect.
+                samples.append(
+                    (
+                        live_footer.display,
+                        id(live_footer) == footer_identity,
+                        live_footer.styles.border_top[0] != "" and live_footer.styles.border_bottom[0] != "",
+                    )
+                )
+
+            session._on_status_change = _sampling_status_change
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "please read the file"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            # #transcript / #app-footer / #prompt-input all still exist,
+            # unchanged in kind and position.
+            assert app.query_one("#transcript", VerticalScroll) is transcript
+            assert app.query_one("#app-footer", AppFooter) is footer
+            assert app.query_one("#prompt-input", PromptTextArea) is prompt
+
+            # At least one sample per status change (tool start, tool
+            # end, done) actually fired — not a vacuously-true empty list.
+            assert len(samples) >= 2
+            assert all(display for display, _, _ in samples), samples
+            assert all(same_identity for _, same_identity, _ in samples), samples
+            assert all(has_borders for _, _, has_borders in samples), samples
+
+            assert footer.display is True
+            assert _footer_has_both_borders(app)
+            assert "final streamed response" in _transcript_text(app)
 
 
 def test_console_output_sink_is_the_default_for_a_plain_session(tmp_path: Path) -> None:

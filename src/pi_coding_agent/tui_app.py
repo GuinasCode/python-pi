@@ -28,6 +28,7 @@ getToolsExpanded/setToolsExpanded) and the extension-management screens.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, ClassVar
 
 from rich.console import Group, RenderableType
@@ -224,6 +225,50 @@ class AppFooter(Static):
             self.update(Group(self._status_content, content))
 
 
+class TransientFooterContent(OptionList):
+    """Self-contained transient overlay for short-lived interactive
+    picks that belong neither to the persistent AppFooter nor to the
+    transcript — currently just the bare ``/model`` command's inline
+    model list (``PiApp._select_model_transient``). Lives inside
+    #bottom-bar, directly above AppFooter (see ``PiApp.compose``), so it
+    visually sits between the transcript and the persistent footer —
+    never replacing, hiding, or reusing AppFooter itself, and never
+    stored as footer state (persistent footer state != transient
+    interaction state).
+
+    ``show_options``/``hide`` are the only two ways in or out, and
+    ``hide`` is unconditionally called from ``_select_model_transient``'s
+    ``finally`` — cleanup never depends on a caller remembering to clear
+    it after a real pick, a cancel (Escape), or an early return (e.g. no
+    models configured). ``display`` starts False and ``hide`` always
+    restores that, so at rest this widget takes no layout space at all."""
+
+    DEFAULT_CSS = """
+    TransientFooterContent {
+        width: 100%;
+        height: auto;
+        max-height: 10;
+        border: solid $accent;
+        display: none;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.display = False
+
+    def show_options(self, labels: list[str]) -> None:
+        self.clear_options()
+        self.add_options(labels)
+        self.highlighted = 0
+        self.display = True
+        self.focus()
+
+    def hide(self) -> None:
+        self.display = False
+        self.clear_options()
+
+
 class PiApp(App[None]):
     """Alt-screen Textual front-end for an InteractiveSession."""
 
@@ -283,6 +328,12 @@ class PiApp(App[None]):
         # concurrent run_turn — /steer and /stop instead of a conflicting
         # second turn.
         self._turn_in_progress = False
+        # Resolved by on_option_list_option_selected (a real pick) or
+        # on_key (Escape) while the bare `/model` picker is open — see
+        # _select_model_transient. None whenever no picker is open, so
+        # both handlers can check "is anyone waiting on this" instead of
+        # blindly resolving a stale/already-done future.
+        self._transient_selection_future: asyncio.Future[str | None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="ext-header")
@@ -302,6 +353,11 @@ class PiApp(App[None]):
         # what actually guarantees no overlap, not a fragile paint-order
         # coincidence.
         with VerticalGroup(id="bottom-bar"):
+            # Sits directly *above* AppFooter — see TransientFooterContent's
+            # docstring — so the model picker (the only thing that shows
+            # it today) appears between the transcript and the persistent
+            # footer, never inside or instead of it.
+            yield TransientFooterContent(id="transient-footer")
             yield AppFooter(id="app-footer")
             yield Static(id="ext-widget")
             yield OptionList(id="suggestions")
@@ -406,6 +462,14 @@ class PiApp(App[None]):
         A no-op on every other keystroke, which is the common case (no
         popup open, no extension shortcuts registered).
         """
+        transient = self.query_one("#transient-footer", TransientFooterContent)
+        if transient.display and event.key == "escape":
+            event.stop()
+            event.prevent_default()
+            if self._transient_selection_future is not None and not self._transient_selection_future.done():
+                self._transient_selection_future.set_result(None)
+            return
+
         suggestions = self.query_one("#suggestions", OptionList)
         if suggestions.display:
             if event.key == "tab" and suggestions.highlighted is not None:
@@ -446,6 +510,70 @@ class PiApp(App[None]):
         down (e.g. a future confirm/select dialog), which only works from
         inside a worker context."""
         await self._session._handle_extension_shortcut(key)
+        self._update_footer()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Resolves _select_model_transient's pending future on a real
+        pick from the transient model list — the #suggestions popup
+        (also an OptionList) never actually holds focus (its up/down/Tab
+        handling is done manually in on_key while focus stays on the
+        prompt editor — see there), so this only ever fires for
+        #transient-footer in practice; the id check is a defensive
+        no-op guard against that changing later, not dead code."""
+        if event.option_list.id != "transient-footer":
+            return
+        event.stop()
+        if self._transient_selection_future is not None and not self._transient_selection_future.done():
+            self._transient_selection_future.set_result(str(event.option.prompt))
+
+    async def _select_model_transient(self) -> None:
+        """Bare `/model` (no arguments) in the fullscreen app: show the
+        model list as a transient overlay directly above the persistent
+        footer (TransientFooterContent, never AppFooter itself) instead
+        of a centered modal dialog. `finally` guarantees the panel is
+        hidden and the prompt refocused no matter how this ends — a real
+        pick, Escape, or an early return below — so the caller can never
+        leave stale model-list content on screen. `/model <id>` (with an
+        argument) is unaffected: that still goes through
+        InteractiveSession._handle_command's direct-switch path, which
+        never opens any picker."""
+        providers = self._session._models.get_providers()
+        choices = [model for provider in providers for model in provider.get_models()]
+        if not choices:
+            self._append_transcript_note("[dim]no providers configured[/dim]")
+            return
+        if len(choices) == 1:
+            only = choices[0]
+            self._append_transcript_note(
+                f"[dim]only model available:[/dim] [bold]{escape(only.provider)}/{escape(only.id)}[/bold]"
+            )
+            return
+
+        labels = [f"{m.provider}/{m.id}" for m in choices]
+        panel = self.query_one("#transient-footer", TransientFooterContent)
+        panel.show_options(labels)
+
+        future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        self._transient_selection_future = future
+        try:
+            selected_label = await future
+        finally:
+            self._transient_selection_future = None
+            panel.hide()
+            self.query_one("#prompt-input", PromptTextArea).focus()
+
+        if selected_label is None:
+            self._append_transcript_note("[dim]cancelled[/dim]")
+            return
+
+        selected = next((m for m, label in zip(choices, labels, strict=True) if label == selected_label), None)
+        if selected is None:
+            return
+        self._session._model = selected
+        self._session._agent_session.set_model(selected)
+        self._append_transcript_note(
+            f"[green]switched to[/green] [bold]{escape(selected.provider)}/{escape(selected.id)}[/bold]"
+        )
         self._update_footer()
 
     def on_prompt_text_area_submitted(self, event: PromptTextArea.Submitted) -> None:
@@ -497,6 +625,18 @@ class PiApp(App[None]):
         could still be running.
         """
         if text.startswith("/"):
+            # Bare `/model` (no id argument) is intercepted here rather
+            # than left to InteractiveSession._handle_command: that
+            # shared handler's own no-argument branch opens a centered
+            # SelectDialog modal via ctx.ui.select() (fine for
+            # extensions calling the same generic API, but not the
+            # transient-footer-above-the-persistent-footer UX this app
+            # wants specifically for its own model picker) — see
+            # _select_model_transient. `/model <id>` is untouched: that
+            # still flows through _handle_command's direct-switch path.
+            if text.lower() == "/model":
+                await self._select_model_transient()
+                return
             should_continue = await self._session._handle_command(text)
             self._update_footer()
             if not should_continue:
