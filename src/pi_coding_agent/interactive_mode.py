@@ -13,6 +13,7 @@ import inspect
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -128,11 +129,10 @@ def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
 
 def _visible_row_count(markup: str, width: int) -> int:
     """How many terminal rows one logical `markup` line occupies once
-    auto-wrapped at `width` — shared by _prompt_input's live footer and
-    InteractiveSession's mid-turn status footer, so both count wrapped
-    rows (e.g. a long model id pushing the state line past one row)
-    identically instead of two independently-maintained copies of this
-    math drifting apart."""
+    auto-wrapped at `width` — used by InteractiveSession._render_live_box
+    so its row-count math (used both for drawing and for erasing) has one
+    single source of truth for what "one row" means, rather than
+    independently-maintained copies of this math drifting apart."""
     visible_len = len(Text.from_markup(markup).plain)
     return max(1, -(-max(visible_len, 1) // width))
 
@@ -253,31 +253,46 @@ class InteractiveSession:
         self._model = model
         self._cwd = cwd
         self._config_dir = config_dir or get_config_dir()
-        # Mid-turn status footer state (session/mode info pinned to the
-        # bottom of the terminal, kept visible for the whole turn — see
-        # _begin_turn_footer/_end_turn_footer/_footer_before_output/
-        # _footer_after_output below). Set before constructing self._output
-        # since FooterAwareOutputSink is handed bound methods that read
-        # these attributes, even though they're not called until later.
-        self._footer_active = False
-        self._footer_on_screen = False
-        self._footer_row_count = 0
+        # The live input box (prompt + typed text + rule + state/mode/repo
+        # footer) — kept on screen continuously for the whole REPL
+        # session, not just while actively being typed into. See
+        # _render_live_box/_erase_live_box/_read_live_line and
+        # repl_loop/_run_turn_accepting_mid_turn_input below for the full
+        # picture. `_input_render_lock` is a real threading.Lock, not an
+        # asyncio one: keystroke redraws happen on a background thread
+        # (read_line_with_cycle blocks there — see _read_live_line), while
+        # turn output redraws happen on the main event-loop thread; both
+        # sides must serialize on the exact same primitive or their
+        # terminal writes can interleave mid-escape-sequence.
+        self._input_render_lock = threading.Lock()
+        self._live_text = ""
+        self._live_cursor = 0
+        self._live_selection: tuple[int, int] | None = None
+        self._live_cursor_row = 0
+        self._live_footer_rows = 0
+        self._live_shown = False
+        self._live_prompt = "\033[1m>\033[0m "
+        self._live_prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
+        # A _read_live_line() task left pending when a turn finished before
+        # the user pressed Enter — reused as the next prompt's read instead
+        # of starting a second, competing raw-mode stdin reader.
+        self._pending_live_input_task: asyncio.Task[str | None] | None = None
 
         # Where run_turn()/_handle_command() render to. Defaults to the
         # classic REPL's Console — the Textual app (--ui-mode fullscreen)
         # passes its own sink so the exact same event/command handling
         # renders into a transcript widget instead of straight to stdout,
-        # and already keeps its footer visible natively via Textual's own
-        # docked-widget layout, so it gets the plain console sink, not the
-        # footer-aware wrapper (which exists to fake that for a raw
-        # terminal).
+        # and already keeps its input/footer visible natively via
+        # Textual's own docked-widget layout, so it gets the plain console
+        # sink, not the live-box-aware wrapper (which exists to fake that
+        # for a raw terminal).
         self._output: OutputSink = (
             output
             if output is not None
             else FooterAwareOutputSink(
                 ConsoleOutputSink(_console),
-                before=self._footer_before_output,
-                after=self._footer_after_output,
+                before=self._box_before_output,
+                after=self._box_after_output,
             )
         )
         # How _permission_gate's "ask" decision actually asks. Defaults to
@@ -389,13 +404,25 @@ class InteractiveSession:
         """Ask the user to approve a single mutating tool call (y/N).
 
         Prints straight to `_console`, bypassing self._output/
-        FooterAwareOutputSink — so the mid-turn status footer (if
-        active) is erased first and redrawn after, the same way the
-        wrapped sink handles every other print during a turn, just done
-        by hand here since this one call site talks to the console
-        directly (it needs blocking input(), not just a print)."""
+        FooterAwareOutputSink — so the live box is erased first and
+        redrawn after by hand here, same as the wrapped sink does for
+        every other print, just done directly since this call site needs
+        blocking input(), not just a print.
+
+        Known limitation: this can run concurrently with a mid-turn
+        /steer read (_run_turn_accepting_mid_turn_input's own background
+        stdin reader) if a tool confirmation happens to fire while the
+        user is actively typing — both are blocking reads on the same
+        stdin from different threads, and there's no coordination
+        between them beyond the terminal-write lock this method already
+        takes. In that narrow window a keystroke could be delivered to
+        the "wrong" reader. Not corruption of terminal *state* (the lock
+        still prevents interleaved writes), just a rare mis-routed key —
+        a real gap, not one this pass closes; documented rather than
+        silently ignored (spec: "não prometa isolamento que não
+        existe")."""
         args_str = _fmt_args(args)
-        self._footer_before_output()
+        self._box_before_output()
         _console.print(
             f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] Allow [bold]{escape(tool_name)}[/bold]({args_str})? "
             "[dim](y/N)[/dim]",
@@ -407,25 +434,31 @@ class InteractiveSession:
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         finally:
-            self._footer_after_output()
+            self._box_after_output()
         return answer.strip().lower() in ("y", "yes")
 
     async def _soul_yes_no(self, prompt_text: str) -> bool:
+        self._box_before_output()
         _console.print(f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] {prompt_text} [dim](y/N)[/dim]", end=" ")
         loop = asyncio.get_running_loop()
         try:
             answer = await loop.run_in_executor(None, input)
         except (EOFError, KeyboardInterrupt):
             answer = "n"
+        finally:
+            self._box_after_output()
         return answer.strip().lower() in ("y", "yes")
 
     async def _soul_read_line(self, prompt_text: str) -> str:
+        self._box_before_output()
         _console.print(f"{prompt_text} ", end="")
         loop = asyncio.get_running_loop()
         try:
             answer = await loop.run_in_executor(None, input)
         except (EOFError, KeyboardInterrupt):
             return ""
+        finally:
+            self._box_after_output()
         return answer.strip()
 
     async def _soul_choice(self, prompt_text: str, options: dict[str, str], *, default: str) -> str:
@@ -1139,263 +1172,202 @@ class InteractiveSession:
             lines.append(repo_line)
         return lines
 
-    def _draw_footer(self) -> None:
-        """Print the rule + state/mode[/repo] lines at the current
-        cursor position and remember how many rows they occupy, so a
-        later _erase_footer removes exactly that many — no more, no
-        less. Safe to call while already on screen (erases the stale
-        copy first) since _footer_before_output/_footer_after_output can
-        otherwise fire back-to-back for adjacent prints."""
-        if self._footer_on_screen:
-            self._erase_footer()
+    def _row_col_after(self, n: int) -> tuple[int, int]:
+        """0-indexed row and 1-indexed column of the position right after
+        the n-th character has been laid out at the console's current
+        width (n counts from the input row's own start, prompt included)
+        — "deferred wrap" convention: filling a row exactly stays put on
+        that row's last column rather than jumping to a new, still-empty
+        one, matching how a plain character write actually leaves the
+        terminal's cursor (real wrapping only happens once a *further*
+        character forces it)."""
         w = _console.width
-        lines = self._footer_lines()
+        row = (n - 1) // w
+        col = min(((n - 1) % w) + 2, w)
+        return row, col
+
+    def _render_live_box(self, text: str, cursor: int, selection: tuple[int, int] | None) -> None:
+        """Full redraw of the live box (prompt + typed text + rule +
+        state/mode[/repo] footer) at the current cursor position. Caller
+        must hold `_input_render_lock`.
+
+        The whole block is fully repainted on every call, not patched in
+        place — input can wrap across multiple terminal rows once it's
+        long enough (the terminal does this on its own), and the footer
+        sits immediately below it, so incrementally patching the screen
+        while tracking exactly how many rows the wrapped input currently
+        occupies (and where within them the cursor now sits, since
+        Left/Right/Home/End can put it anywhere in the buffer, not just
+        the end) is fragile row-arithmetic. A full repaint sidesteps
+        needing that arithmetic — a human's typing rate, or a turn's own
+        pace of printing, makes the repaint itself unnoticeable.
+
+        Positioning is done with *relative* cursor moves only (CSI
+        A/B — up/down N rows — never DECSC/DECRC save/restore): every
+        move is computed from `_live_cursor_row`, the 0-indexed row (from
+        the box's own first row) the cursor was left on by the previous
+        render, tracked here rather than asked of the terminal. DECSC/
+        DECRC was tried first and had to be abandoned — it saves a
+        position relative to the *current screen*, and doesn't reliably
+        keep tracking that position across a scroll event (e.g. one
+        caused by a long assistant reply, or even by the box's own lines
+        pushing the viewport) that happens between the save and a later
+        restore; when that desync happens, DECRC lands one or more rows
+        off from where the box actually is, and each redraw's restore
+        being off by a different, drifting amount is exactly what caused
+        the box to visibly duplicate itself down the screen. Plain
+        relative moves have no "remembered absolute position" to desync
+        in the first place — they always act on wherever the cursor
+        genuinely is right now."""
+        self._live_text, self._live_cursor, self._live_selection = text, cursor, selection
+
+        self._erase_live_box()  # no-op if nothing's shown yet
+
+        if selection is None:
+            sys.stdout.write(self._live_prompt + text)
+        else:
+            # SGR 7/27 (reverse video on/off) around the selected span —
+            # zero-width control codes, don't affect the row/column math
+            # below, which only ever counts visible characters.
+            lo, hi = selection
+            sys.stdout.write(self._live_prompt + text[:lo] + "\x1b[7m" + text[lo:hi] + "\x1b[27m" + text[hi:])
+
+        # The footer always starts on the row right after the input's own
+        # last row, via an explicit \r\n — not by relying on the
+        # terminal's autowrap eventually carrying it there, which
+        # inherits the same deferred-wrap ambiguity _row_col_after
+        # documents (whether a just-filled row already counts as "used"
+        # is exactly what's unclear about that pending state; an explicit
+        # \r\n sidesteps needing an answer).
+        w = _console.width
+        input_last_row, _ = self._row_col_after(self._live_prompt_visible_len + len(text))
+        footer_lines = self._footer_lines()
         with _console.capture() as capture:
-            _console.print(("─" * w) + "\n" + "\n".join(lines), end="")
+            _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
         sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
-        sys.stdout.flush()
-        # +1 for the rule itself, on top of however many rows each footer
-        # line wraps to at the current terminal width (see
-        # _visible_row_count — the same wrap-counting _prompt_input's own
-        # live footer uses, so both agree on what "one row" means).
-        self._footer_row_count = 1 + sum(_visible_row_count(line, w) for line in lines)
-        self._footer_on_screen = True
 
-    def _erase_footer(self) -> None:
-        if not self._footer_on_screen:
+        # 1 row for the rule (always exactly `w` "─" chars) + however many
+        # rows each footer line actually wraps to — not a fixed count
+        # (state_line, in particular, can wrap on its own once a longer
+        # model id is active on a narrower terminal; a fixed count used
+        # to under-count that and cause a duplication bug identical in
+        # shape to the one this same arithmetic once had here).
+        footer_rows = 1 + sum(_visible_row_count(line, w) for line in footer_lines)
+        footer_last_row = input_last_row + footer_rows
+        cursor_row, cursor_col = self._row_col_after(self._live_prompt_visible_len + cursor)
+        rows_up = footer_last_row - cursor_row
+        if rows_up:
+            sys.stdout.write(f"\x1b[{rows_up}A")
+        sys.stdout.write(f"\x1b[{cursor_col}G")
+        sys.stdout.flush()
+
+        self._live_cursor_row = cursor_row
+        self._live_footer_rows = footer_rows
+        self._live_shown = True
+
+    def _erase_live_box(self) -> None:
+        """Caller must hold `_input_render_lock`.
+
+        Moves up `_live_cursor_row` — not `_live_footer_rows` — to land
+        back on the box's own *first* row (the prompt/input line), the
+        same quantity `_render_live_box`'s own internal erase-before-
+        redraw branch uses (it's "rows from the input's own first row to
+        wherever the cursor currently sits", tracked across renders,
+        exactly like the original _prompt_input's `_render` closure this
+        replaced). `_live_footer_rows` counts only the rule+footer-lines
+        rows — using it here instead landed one or more rows *below* the
+        input's own first row whenever that row wasn't also the last
+        rendered row (e.g. right after the box's very first draw, cursor
+        and input row coincide at row 0 either way, but as soon as real
+        content is printed before/after it they don't), erasing only
+        part of the box and leaving stale content — the actual shape of
+        a real bug this comment replaces, not a hypothetical one.
+
+        A single `\\x1b[0J` from that row clears everything below it too
+        (footer included) — no need to separately account for the
+        footer's own row count at all once the cursor is back at the
+        input row."""
+        if not self._live_shown:
             return
-        # _draw_footer starts from a blank row (the cursor's row right
-        # after a normal print's trailing "\n") and moves down exactly
-        # `_footer_row_count` rows via its own leading "\r\n" plus one
-        # "\r\n" between each footer line — landing on the *last* footer
-        # row, not one past it (its final line has no trailing newline).
-        # Moving up that same `_footer_row_count` retraces those exact
-        # row transitions back to the blank starting row — one row less
-        # than that would leave the footer's own last line behind; one
-        # row more would walk past the blank row into the real content
-        # printed just before it and clear that too (the bug this
-        # comment replaces: a fencepost off-by-one here silently ate the
-        # line printed immediately before the footer on every redraw).
-        rows = self._footer_row_count
-        sys.stdout.write(f"\x1b[{rows}A\r\x1b[0J")
+        if self._live_cursor_row:
+            sys.stdout.write(f"\x1b[{self._live_cursor_row}A")
+        sys.stdout.write("\r\x1b[0J")
         sys.stdout.flush()
-        self._footer_on_screen = False
+        self._live_shown = False
 
-    def _begin_turn_footer(self) -> None:
-        """Call once, right before a turn starts — makes the status
-        footer part of the display (spec: "sempre visível") for the
-        whole turn, not just while the input box is on screen."""
-        self._footer_active = True
-        self._draw_footer()
+    def _box_before_output(self) -> None:
+        """FooterAwareOutputSink's `before` hook — erases the live box
+        (if currently shown) so the next thing printed lands where it
+        would have anyway, above where the box reappears."""
+        with self._input_render_lock:
+            self._erase_live_box()
 
-    def _end_turn_footer(self) -> None:
-        """Call once, right after a turn ends — removes the footer so
-        _prompt_input's own (independent, unchanged) live footer takes
-        over cleanly for the next input cycle instead of leaving two
-        copies on screen."""
-        self._erase_footer()
-        self._footer_active = False
-
-    def _footer_before_output(self) -> None:
-        """FooterAwareOutputSink's `before` hook — a no-op outside a
-        turn (_footer_active is only True between _begin_turn_footer and
-        _end_turn_footer), so slash-command output and anything else
-        printed through self._output when no turn is running is
-        completely unaffected."""
-        if self._footer_active:
-            self._erase_footer()
-
-    def _footer_after_output(self) -> None:
-        """FooterAwareOutputSink's `after` hook — redraws the footer
-        immediately below whatever was just printed, keeping it pinned
-        to the bottom of the growing transcript rather than left behind
-        above new output."""
-        if self._footer_active:
-            self._draw_footer()
+    def _box_after_output(self) -> None:
+        """FooterAwareOutputSink's `after` hook — redraws the box
+        (prompt + whatever's currently typed + footer) immediately below
+        whatever was just printed, using its own last-known text/cursor/
+        selection — so it stays pinned to the bottom of the growing
+        transcript instead of left behind above new output, and a
+        message queued mid-turn doesn't wipe out whatever the user was
+        still typing."""
+        with self._input_render_lock:
+            self._render_live_box(self._live_text, self._live_cursor, self._live_selection)
 
     def _refresh_status_footer(self) -> None:
-        """Wired as self._on_status_change — redraws the footer in place
+        """Wired as self._on_status_change — redraws the box in place
         whenever self._status changes (e.g. "thinking..." -> "running:
         bash" -> "thinking..." -> "ready"), so the state line is live
         even between prints, not just refreshed as a side effect of the
         next thing that happens to print."""
-        if self._footer_active:
-            self._draw_footer()
+        with self._input_render_lock:
+            self._render_live_box(self._live_text, self._live_cursor, self._live_selection)
 
-    async def _prompt_input(self) -> str | None:
-        """Draw the bordered input area with a live footer, return stripped text or None on exit.
+    async def _read_live_line(self) -> str | None:
+        """Read one line through the live box, without reprinting the
+        tips/rule header (see repl_loop, which prints that once at
+        startup — the box itself persists for the rest of the session).
+        Used both for the top-level prompt and for mid-turn /steer //
+        /stop reads (_run_turn_accepting_mid_turn_input) — the box stays
+        on screen and editable throughout either way, unlike the old
+        per-turn footer that only existed while nothing else was
+        printing.
 
-        The whole block (prompt + typed text + bottom rule + state/mode
-        [/repo] lines) is fully redrawn on every keystroke, not just when
-        Shift+Tab is pressed — input can wrap across multiple terminal
-        rows once it's long enough (the terminal does this on its own),
-        and the footer sits immediately below it, so incrementally
-        patching the screen in place while tracking exactly how many rows
-        the wrapped input currently occupies (and where within them the
-        cursor now sits, since Left/Right/Home/End can put it anywhere in
-        the buffer, not just the end) is fragile row-arithmetic. A full
-        repaint sidesteps needing that arithmetic — a human's typing rate
-        makes the repaint itself unnoticeable.
-
-        Positioning is done with *relative* cursor moves only (CSI
-        A/B — up/down N rows — never DECSC/DECRC save/restore): every
-        move is computed from ``last_cursor_row``, the 0-indexed row (from
-        the input's own first row) the cursor was left on by the
-        previous render, which this method tracks itself rather than
-        asking the terminal to remember a position for it. DECSC/DECRC
-        was tried first and had to be abandoned — it saves a position
-        relative to the *current screen*, and doesn't reliably keep
-        tracking that position across a scroll event (e.g. one caused by
-        a long assistant reply, or even by the footer's own lines pushing
-        the viewport) that happens between the save and a later restore;
-        when that desync happens, DECRC lands one or more rows off from
-        where the input row actually is, and each keystroke's restore
-        being off by a different, drifting amount is exactly what caused
-        the footer to visibly duplicate itself down the screen. Plain
-        relative moves have no "remembered absolute position" to desync
-        in the first place — they always act on wherever the cursor
-        genuinely is right now.
+        Blocks on a background thread (`read_line_with_cycle` reads raw
+        keys synchronously) — every render it triggers goes through
+        `_input_render_lock`, the same lock `_box_before_output`/
+        `_box_after_output` use from the main event-loop thread for
+        output printed while this is still pending, so a keystroke
+        redraw and a turn's output redraw can never interleave mid
+        escape-sequence.
         """
-        w = _console.width
 
-        # Tips — left-aligned, one line above the top border
-        tips = "/help  /clear  /model  /session  /exit"
-        _console.print(f"[{DIM_STYLE}]{tips}[/{DIM_STYLE}]")
-
-        # Top rule — plain horizontal line spanning the terminal width.
-        # \r\n (not bare \n): this runs before _raw_mode is entered inside
-        # read_line_with_cycle, but _render below also writes during raw
-        # mode, where ONLCR is off — using \r\n unconditionally everywhere
-        # in this method keeps its behavior identical in both cases rather
-        # than depending on which mode happens to be active when it runs.
-        sys.stdout.write("─" * w + "\r\n")
-        sys.stdout.flush()
-
-        repo_line = self._repo_line()
-
-        prompt = "\033[1m>\033[0m "
-        prompt_visible_len = 2  # "> " — the bold/reset codes above are zero-width
-
-        def _line_rows(markup: str) -> int:
-            """How many terminal rows printing one *logical* line of
-            `markup` (rich markup, followed by a newline) actually
-            occupies once the terminal auto-wraps it at width `w` (see
-            module-level `_visible_row_count`, which does the actual
-            math) — 1 unless its visible (tag-stripped) length exceeds
-            `w`, in which case every extra full width's worth of
-            overflow forces another. state_line in particular (status +
-            provider/model + session id all on one line) routinely runs
-            long enough to wrap on its own once a longer model id is
-            active, and footer_rows treating every footer line as
-            exactly one row
-            regardless used to under-count whenever that happened — the
-            following render's move-up then landed short of the input's
-            actual first row, leaving it only partially cleared and
-            visibly duplicated below the stale remainder.
-            """
-            return _visible_row_count(markup, w)
-
-        def _row_col_after(n: int) -> tuple[int, int]:
-            """0-indexed row and 1-indexed column of the position right
-            after the n-th character has been laid out at terminal width
-            `w` (n counts from the input row's own start, prompt
-            included) — "deferred wrap" convention: filling a row exactly
-            stays put on that row's last column rather than jumping to a
-            new, still-empty one, matching how a plain character write
-            actually leaves the terminal's cursor (real wrapping only
-            happens once a *further* character forces it)."""
-            row = (n - 1) // w
-            col = min(((n - 1) % w) + 2, w)
-            return row, col
-
-        # 0-indexed row (from the input's own first row) the cursor is
-        # currently sitting on — 0 before the first render, since nothing
-        # has been drawn yet and the cursor is right where the input row
-        # starts. Every render moves up exactly this many rows before
-        # redrawing, then updates it to reflect where it left off.
-        last_cursor_row = 0
-        last_text = ""
-        last_footer_rows = 0
-
-        def _render(text: str, cursor: int, selection: tuple[int, int] | None) -> None:
-            nonlocal last_text, last_cursor_row, last_footer_rows
-            last_text = text
-
-            if last_cursor_row:
-                sys.stdout.write(f"\x1b[{last_cursor_row}A")
-            sys.stdout.write("\r\x1b[0J")  # column 0, wipe any longer previous render
-
-            if selection is None:
-                sys.stdout.write(prompt + text)
-            else:
-                # SGR 7/27 (reverse video on/off) around the selected span
-                # — zero-width control codes, don't affect the row/column
-                # math below, which only ever counts visible characters.
-                lo, hi = selection
-                sys.stdout.write(prompt + text[:lo] + "\x1b[7m" + text[lo:hi] + "\x1b[27m" + text[hi:])
-
-            # The footer always starts on the row right after the input's
-            # own last row, via an explicit \r\n — not by relying on the
-            # terminal's autowrap eventually carrying it there, which
-            # inherits the same deferred-wrap ambiguity _row_col_after
-            # documents (whether a just-filled row already counts as
-            # "used" is exactly what's unclear about that pending state;
-            # an explicit \r\n sidesteps needing an answer).
-            input_last_row, _ = _row_col_after(prompt_visible_len + len(text))
-            footer_lines = [self._state_line(), self._mode_line()]
-            if repo_line:
-                footer_lines.append(repo_line)
-            with _console.capture() as capture:
-                _console.print(("─" * w) + "\n" + "\n".join(footer_lines), end="")
-            sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
-
-            # 1 row for the rule (always exactly `w` "─" chars) + however
-            # many rows each footer line actually wraps to — not a fixed
-            # count, see _line_rows.
-            footer_rows = 1 + sum(_line_rows(line) for line in footer_lines)
-            footer_last_row = input_last_row + footer_rows
-            cursor_row, cursor_col = _row_col_after(prompt_visible_len + cursor)
-            rows_up = footer_last_row - cursor_row
-            if rows_up:
-                sys.stdout.write(f"\x1b[{rows_up}A")
-            sys.stdout.write(f"\x1b[{cursor_col}G")
-            sys.stdout.flush()
-
-            last_cursor_row = cursor_row
-            last_footer_rows = footer_rows
+        def on_render(text: str, cursor: int, selection: tuple[int, int] | None) -> None:
+            with self._input_render_lock:
+                self._render_live_box(text, cursor, selection)
 
         def on_cycle() -> None:
             self._cycle_permission_mode()
-
-        def land_below_footer() -> None:
-            input_last_row, _ = _row_col_after(prompt_visible_len + len(last_text))
-            footer_last_row = input_last_row + last_footer_rows
-            rows_down = footer_last_row - last_cursor_row
-            if rows_down:
-                sys.stdout.write(f"\x1b[{rows_down}B")
-            # A real \r\n for the last step (not another CSI-B) so the
-            # terminal scrolls if the footer was sitting at the bottom of
-            # the visible viewport — cursor-only movement would just clamp
-            # there instead of producing a fresh line to print into.
-            sys.stdout.write("\r\n")
-            sys.stdout.flush()
 
         try:
             raw = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: read_line_with_cycle(
-                    prompt, on_render=_render, on_cycle=on_cycle, history=self._prompt_history
+                    self._live_prompt, on_render=on_render, on_cycle=on_cycle, history=self._prompt_history
                 ),
             )
         except EOFError:
-            land_below_footer()
             return None
         except KeyboardInterrupt:
-            land_below_footer()
-            _console.print("[dim]interrupted[/dim]")
+            self._output.print("[dim]interrupted[/dim]")
             return ""
 
-        land_below_footer()
+        # The box still visually shows the just-submitted text — cleared
+        # here so the *next* erase/redraw cycle (triggered by whatever
+        # prints next: the highlighted echo of this very line, a turn's
+        # output, or the next _read_live_line call) picks up an empty,
+        # ready-for-more-input box instead of redrawing stale text.
+        with self._input_render_lock:
+            self._live_text, self._live_cursor, self._live_selection = "", 0, None
         return raw.strip()
 
     def _print_user_message(self, text: str) -> None:
@@ -1403,22 +1375,93 @@ class InteractiveSession:
         w = _console.width
         # Pad to full terminal width so background fills the line
         padded = f"  {text}  "
-        _console.print(f"[bold on grey23]{escape(padded):<{w}}[/bold on grey23]")
-        _console.print()
+        self._output.print(f"[bold on grey23]{escape(padded):<{w}}[/bold on grey23]")
+        self._output.print()
+
+    def _handle_mid_turn_input(self, text: str) -> None:
+        """A line submitted while run_turn() is still in flight — never
+        starts a second, concurrent turn (AgentSession.prompt() isn't
+        reentrant). "/stop" requests the current turn abort at the next
+        tool-call boundary; anything else (with or without an explicit
+        "/steer" prefix — the box doesn't need the prefix to know a turn
+        is already running) is queued via queue_steer_message and
+        delivered as an ordinary follow-up UserMessage at that same
+        boundary, exactly like a normal next prompt would be, just
+        without waiting for this one to finish first."""
+        if text == "/stop":
+            self._agent_session.request_stop()
+            self._output.print("[dim]stop requested — finishing at the next turn boundary[/dim]")
+            return
+        steer_text = text[len("/steer") :].strip() if text.startswith("/steer") else text
+        if not steer_text:
+            self._output.print(f"[{PASTEL_RED}]usage:[/{PASTEL_RED}] /steer <text>")
+            return
+        self._agent_session.queue_steer_message(steer_text)
+        self._output.print(f"[dim]queued for the next turn boundary:[/dim] {escape(steer_text)}")
+
+    async def _run_turn_accepting_mid_turn_input(
+        self, turn_task: asyncio.Task[AssistantMessage | None]
+    ) -> AssistantMessage | None:
+        """Runs alongside turn_task, concurrently reading more input
+        lines through the same live box — anything submitted while the
+        turn is still going is routed to _handle_mid_turn_input (steer/
+        stop) rather than starting a second, competing turn. Leaves
+        `self._pending_live_input_task` set to whatever read was still
+        in flight when the turn finished, so repl_loop's next prompt
+        reuses that same reader instead of starting a second, competing
+        one on the same stdin."""
+        input_task: asyncio.Task[str | None] | None = asyncio.create_task(self._read_live_line())
+        try:
+            while True:
+                wait_set: set[asyncio.Task[Any]] = {turn_task}
+                if input_task is not None:
+                    wait_set.add(input_task)
+                done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                if turn_task in done:
+                    self._pending_live_input_task = input_task if input_task not in done else None
+                    return turn_task.result()
+                assert input_task is not None
+                submitted = input_task.result()
+                if submitted is None:
+                    # EOF mid-turn: wind the session down, but don't spawn
+                    # another reader — stdin is gone, it would just EOF
+                    # again immediately. Keep waiting on turn_task alone
+                    # until it actually finishes.
+                    self._running = False
+                    self._agent_session.request_stop()
+                    input_task = None
+                    continue
+                if submitted:
+                    self._handle_mid_turn_input(submitted)
+                input_task = asyncio.create_task(self._read_live_line())
+        except BaseException:
+            turn_task.cancel()
+            raise
 
     # ------------------------------------------------------------------
     # REPL loop
     # ------------------------------------------------------------------
 
     async def repl_loop(self) -> None:
-        """Main REPL loop."""
+        """Main REPL loop.
+
+        The live box (prompt + typed text + rule + state/mode/repo
+        footer) is drawn once here and then persists for the *entire*
+        session — never torn down between turns the way the old
+        per-cycle input area was. During a turn it stays visible and
+        editable: `_run_turn_accepting_mid_turn_input` reads further
+        submitted lines concurrently and routes them to /steer or /stop
+        (`_handle_mid_turn_input`) instead of starting a second,
+        competing turn — matching how Claude Code's own CLI keeps taking
+        input while it works, rather than going dark until a turn ends."""
         self._running = True
 
         provider_name = getattr(self._model, "provider", "faux")
         model_name = getattr(self._model, "name", "unknown")
         model_id = getattr(self._model, "id", "?")
 
-        # One-line banner — left-aligned
+        # One-line banner — left-aligned. Printed directly (not through
+        # self._output): the live box isn't drawn yet, nothing to erase.
         _console.print(
             f"[bold]pi[/bold] v0.83.0  [dim]·[/dim]"
             f"  [{PASTEL_BLUE}]{provider_name}[/{PASTEL_BLUE}] / [{PASTEL_BLUE}]{model_name}[/{PASTEL_BLUE}]"
@@ -1427,40 +1470,68 @@ class InteractiveSession:
         )
         _console.print()
 
-        while self._running:
-            user_input = await self._prompt_input()
+        # Tips + top rule, printed once here rather than before every
+        # prompt cycle the way the old per-turn box used to — the live
+        # box now persists for the whole session instead of disappearing
+        # and reappearing, so reprinting the hint every cycle would just
+        # be noise scrolling past.
+        tips = "/help  /clear  /model  /session  /exit"
+        _console.print(f"[{DIM_STYLE}]{tips}[/{DIM_STYLE}]")
+        sys.stdout.write("─" * _console.width + "\r\n")
+        sys.stdout.flush()
+        with self._input_render_lock:
+            self._render_live_box("", 0, None)
 
-            if user_input is None:  # EOF
-                break
-            if not user_input:  # empty or interrupted
-                continue
+        try:
+            while self._running:
+                if self._pending_live_input_task is not None:
+                    input_task = self._pending_live_input_task
+                    self._pending_live_input_task = None
+                else:
+                    input_task = asyncio.create_task(self._read_live_line())
+                user_input = await input_task
 
-            self._prompt_history.append(user_input)
-
-            if user_input.startswith("/"):
-                if not await self._handle_command(user_input):
+                if user_input is None:  # EOF
                     break
-                continue
+                if not user_input:  # empty or interrupted
+                    continue
 
-            _console.print()
-            self._print_user_message(user_input)
-            self._status = "thinking..."
-            # Keep the status footer on screen for the whole turn — not
-            # just while the input box is up — so it stays visible while
-            # the assistant thinks/streams/runs tools, ending only once
-            # the turn is over (_end_turn_footer, in `finally`, so a
-            # mid-turn exception can't leave a stale footer behind).
-            self._begin_turn_footer()
-            try:
-                result = await self.run_turn(user_input)
-            finally:
-                self._end_turn_footer()
-            self._status = "ready"
-            _console.print()
+                self._prompt_history.append(user_input)
 
-            if result and result.stop_reason == StopReason.ERROR:
-                error_msg = result.error_message or "Unknown error"
-                _console.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(error_msg)}")
+                if user_input.startswith("/"):
+                    if not await self._handle_command(user_input):
+                        break
+                    continue
+
+                self._output.print()
+                self._print_user_message(user_input)
+                self._status = "thinking..."
+                turn_task = asyncio.create_task(self.run_turn(user_input))
+                result = await self._run_turn_accepting_mid_turn_input(turn_task)
+                self._status = "ready"
+                self._output.print()
+
+                if result and result.stop_reason == StopReason.ERROR:
+                    error_msg = result.error_message or "Unknown error"
+                    self._output.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(error_msg)}")
+        finally:
+            self._finalize_live_box()
+
+    def _finalize_live_box(self) -> None:
+        """Move the cursor past the live box before the REPL loop exits,
+        so whatever runs next (the shell's own prompt) lands below it
+        instead of overlapping it."""
+        with self._input_render_lock:
+            if not self._live_shown:
+                return
+            input_last_row, _ = self._row_col_after(self._live_prompt_visible_len + len(self._live_text))
+            footer_last_row = input_last_row + self._live_footer_rows
+            rows_down = footer_last_row - self._live_cursor_row
+            if rows_down:
+                sys.stdout.write(f"\x1b[{rows_down}B")
+            sys.stdout.write("\r\n")
+            sys.stdout.flush()
+            self._live_shown = False
 
     async def _handle_extension_command(self, command: str) -> bool:
         """Dispatch `command` to a matching extension-registered slash
@@ -1529,10 +1600,10 @@ class InteractiveSession:
     async def _select_model_interactive_repl(self, choices: list[Model], initial: int) -> Model | None:
         """Arrow-key model picker for the classic REPL's bare ``/model``.
 
-        Same relative-cursor-movement redraw technique as ``_prompt_input``
-        (see its docstring for why: DECSC/DECRC was tried first and
-        abandoned there after it caused the footer-duplication bug this
-        session already fixed once) — but simpler, since a menu's row
+        Same relative-cursor-movement redraw technique as
+        ``_render_live_box`` (see its docstring for why: DECSC/DECRC was
+        tried first and abandoned there after it caused the box-duplication
+        bug this session already fixed once) — but simpler, since a menu's row
         count is fixed for its whole lifetime (no wrapping text to
         account for), so there's no row arithmetic to get wrong beyond
         "move up exactly as many rows as were drawn last time".
@@ -1558,11 +1629,18 @@ class InteractiveSession:
             sys.stdout.flush()
             drawn = True
 
-        self._output.print(f"[{DIM_STYLE}]↑/↓ move · enter select · esc cancel[/{DIM_STYLE}]")
+        # The live box must stay hidden for this picker's whole lifetime
+        # (not just erased-then-redrawn around one print) — _render draws
+        # its own rows directly, with no erase/redraw handshake with the
+        # box, so the two would corrupt each other's row-tracking if both
+        # were live at once.
+        self._box_before_output()
+        _console.print(f"[{DIM_STYLE}]↑/↓ move · enter select · esc cancel[/{DIM_STYLE}]")
         loop = asyncio.get_running_loop()
         index = await loop.run_in_executor(None, lambda: select_from_list(rows, on_render=_render, initial=initial))
         sys.stdout.write("\r\n")
         sys.stdout.flush()
+        self._box_after_output()
         return choices[index] if index is not None else None
 
     async def _handle_command(self, command: str) -> bool:
