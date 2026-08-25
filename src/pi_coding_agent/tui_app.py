@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from rich.console import RenderableType
+from rich.markup import escape
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -208,6 +209,13 @@ class PiApp(App[None]):
         super().__init__()
         self._session = session
         self._autocomplete_providers: list[AutocompleteProvider] = []
+        # Set for the duration of a run_turn() call — the prompt input
+        # stays focused/usable while this is True (Textual never disables
+        # it), but a submission arriving during that window is routed to
+        # _handle_mid_turn_submission instead of starting a second,
+        # concurrent run_turn — /steer and /stop instead of a conflicting
+        # second turn.
+        self._turn_in_progress = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="ext-header")
@@ -361,7 +369,36 @@ class PiApp(App[None]):
         event.text_area.text = ""
         if not text:
             return
+        if self._turn_in_progress:
+            self._handle_mid_turn_submission(text)
+            return
         self._handle_submission(text)
+
+    def _append_transcript_note(self, markup: str) -> None:
+        transcript = self.query_one("#transcript", VerticalScroll)
+        transcript.mount(Static(markup, markup=True))
+        transcript.scroll_end(animate=False)
+
+    def _handle_mid_turn_submission(self, text: str) -> None:
+        """A message submitted while run_turn() is still in flight — never
+        starts a second, concurrent turn (AgentSession.prompt() isn't
+        reentrant). "/stop" requests the current turn abort at the next
+        tool-call boundary; anything else (with or without an explicit
+        "/steer" prefix — the input box doesn't need the prefix to know a
+        turn is already running) is queued via queue_steer_message and
+        delivered as an ordinary follow-up UserMessage at that same
+        boundary, exactly like a normal next prompt would be, just without
+        waiting for this one to finish first."""
+        if text == "/stop":
+            self._session._agent_session.request_stop()
+            self._append_transcript_note("[dim]stop requested — finishing at the next turn boundary[/dim]")
+            return
+        steer_text = text[len("/steer") :].strip() if text.startswith("/steer") else text
+        if not steer_text:
+            self._append_transcript_note("[red]usage:[/red] /steer <text>")
+            return
+        self._session._agent_session.queue_steer_message(steer_text)
+        self._append_transcript_note(f"[dim]queued for the next turn boundary:[/dim] {escape(steer_text)}")
 
     @work(exclusive=True)
     async def _handle_submission(self, text: str) -> None:
@@ -369,6 +406,11 @@ class PiApp(App[None]):
         because it may end up calling push_screen_wait (via
         _confirm_tool_via_modal, several calls down through run_turn's tool
         loop) — push_screen_wait only works from inside a worker context.
+        exclusive=True cancels a *previous, still-running* call to this
+        same worker if a new one starts — harmless here since
+        on_prompt_text_area_submitted only ever calls this when
+        self._turn_in_progress is already False, i.e. no previous call
+        could still be running.
         """
         if text.startswith("/"):
             should_continue = await self._session._handle_command(text)
@@ -381,7 +423,11 @@ class PiApp(App[None]):
         transcript.mount(Static(f"[bold]> {text}[/bold]", markup=True))
         transcript.scroll_end(animate=False)
 
-        result = await self._session.run_turn(text)
+        self._turn_in_progress = True
+        try:
+            result = await self._session.run_turn(text)
+        finally:
+            self._turn_in_progress = False
         self._update_footer()
         if result is not None and result.stop_reason == StopReason.ERROR:
             error_msg = result.error_message or "Unknown error"

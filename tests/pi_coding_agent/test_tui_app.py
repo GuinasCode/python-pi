@@ -193,6 +193,79 @@ class TestPiApp:
             assert session._agent_session._messages == []
 
     @pytest.mark.asyncio
+    async def test_mid_turn_plain_text_is_queued_as_steer_not_a_second_turn(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            app._turn_in_progress = True
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "keep this in mind"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert session._agent_session._pending_steer == ["keep this in mind"]
+            assert session._agent_session._messages == []  # never started a second, concurrent turn
+            assert "queued for the next turn boundary" in _transcript_text(app)
+            assert "keep this in mind" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_explicit_steer_prefix_is_stripped(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            app._turn_in_progress = True
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/steer focus on the tests"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert session._agent_session._pending_steer == ["focus on the tests"]
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_bare_steer_with_no_text_is_a_usage_error(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            app._turn_in_progress = True
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/steer"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert session._agent_session._pending_steer == []
+            assert "usage:" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_mid_turn_stop_requests_abort_at_the_next_boundary(self, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            app._turn_in_progress = True
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/stop"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert session._agent_session._stop_requested is True
+            assert "stop requested" in _transcript_text(app)
+
+    @pytest.mark.asyncio
+    async def test_submission_after_a_turn_finishes_is_a_normal_new_turn(self, tmp_path: Path) -> None:
+        """_turn_in_progress must reset to False once run_turn() actually
+        returns — otherwise every later submission would incorrectly be
+        routed as a steer message forever."""
+        session = _make_session(tmp_path, [faux_assistant_message("first reply")])
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "first message"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert app._turn_in_progress is False
+            assert len(session._agent_session._messages) == 2  # user + assistant
+
+    @pytest.mark.asyncio
     async def test_slash_exit_closes_the_app(self, tmp_path: Path) -> None:
         session = _make_session(tmp_path)
         app = PiApp(session)
