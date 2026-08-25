@@ -1235,7 +1235,25 @@ class InteractiveSession:
         genuinely is right now."""
         self._live_text, self._live_cursor, self._live_selection = text, cursor, selection
 
-        self._erase_live_box()  # no-op if nothing's shown yet
+        # Synchronized-output (DEC private mode 2026): tells a supporting
+        # terminal to hold the erase+redraw below off-screen until the
+        # matching "end" arrives, instead of painting each intermediate
+        # write as its own frame. Ignored harmlessly by terminals that
+        # don't recognize it (it's a private-mode toggle with no visible
+        # side effect on its own), so it's safe to always send. This is
+        # the actual fix for the box flickering on every keystroke/status
+        # change: erase and redraw used to be two *separately flushed*
+        # writes (_erase_live_box flushed on its own, then this method's
+        # own writes flushed again after), so the terminal had a real
+        # chance to paint the box in its erased, blank state as its own
+        # frame before the redraw landed — visible as a flash on every
+        # single render. Batching both into one flush already mostly
+        # fixed that; wrapping them in sync markers additionally protects
+        # against terminals (some ConPTY/Windows Terminal versions
+        # included) that can still repaint mid-write on a large-enough
+        # single write.
+        sys.stdout.write("\x1b[?2026h")
+        self._erase_live_box(flush=False)  # no-op if nothing's shown yet
 
         if selection is None:
             sys.stdout.write(self._live_prompt + text)
@@ -1273,13 +1291,14 @@ class InteractiveSession:
         if rows_up:
             sys.stdout.write(f"\x1b[{rows_up}A")
         sys.stdout.write(f"\x1b[{cursor_col}G")
+        sys.stdout.write("\x1b[?2026l")
         sys.stdout.flush()
 
         self._live_cursor_row = cursor_row
         self._live_footer_rows = footer_rows
         self._live_shown = True
 
-    def _erase_live_box(self) -> None:
+    def _erase_live_box(self, *, flush: bool = True) -> None:
         """Caller must hold `_input_render_lock`.
 
         Moves up `_live_cursor_row` — not `_live_footer_rows` — to land
@@ -1300,13 +1319,25 @@ class InteractiveSession:
         A single `\\x1b[0J` from that row clears everything below it too
         (footer included) — no need to separately account for the
         footer's own row count at all once the cursor is back at the
-        input row."""
+        input row.
+
+        `flush=False` (used by `_render_live_box`, which immediately
+        follows this with its own writes and a single flush at the very
+        end) queues the erase without handing it to the terminal yet —
+        flushing here too would let the terminal paint the box's blank,
+        erased state as its own visible frame before the redraw lands
+        right after, which is exactly what caused the box to flash on
+        every keystroke/status change. Every other caller erases as a
+        standalone operation (something else is about to be printed
+        through the normal Console, which does its own flushing) and
+        keeps the default `flush=True`."""
         if not self._live_shown:
             return
         if self._live_cursor_row:
             sys.stdout.write(f"\x1b[{self._live_cursor_row}A")
         sys.stdout.write("\r\x1b[0J")
-        sys.stdout.flush()
+        if flush:
+            sys.stdout.flush()
         self._live_shown = False
 
     def _box_before_output(self) -> None:
@@ -1524,10 +1555,13 @@ class InteractiveSession:
                 result = await self._run_turn_accepting_mid_turn_input(turn_task)
                 self._status = "ready"
                 self._output.print()
-
-                if result and result.stop_reason == StopReason.ERROR:
-                    error_msg = result.error_message or "Unknown error"
-                    self._output.print(f"[{PASTEL_RED}]error:[/{PASTEL_RED}] {escape(error_msg)}")
+                # No error print here: every provider failure already
+                # reaches _handle_event as an "error" event (see
+                # AgentSession._consume_stream, which both emits that
+                # event *and* returns it as this turn's `result`) — a
+                # second print here keyed off `result.stop_reason ==
+                # StopReason.ERROR` printed the exact same message a
+                # second time, back to back, for every single error.
         finally:
             self._finalize_live_box()
 
