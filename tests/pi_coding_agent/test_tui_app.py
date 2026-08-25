@@ -21,7 +21,7 @@ from pi_ai.models import MutableModels
 from pi_ai.providers.faux import faux_assistant_message, faux_provider
 from pi_coding_agent.dialogs import ConfirmDialog
 from pi_coding_agent.interactive_mode import InteractiveSession
-from pi_coding_agent.output_sink import ConsoleOutputSink
+from pi_coding_agent.output_sink import ConsoleOutputSink, FooterAwareOutputSink
 from pi_coding_agent.permission_mode import PermissionMode
 from pi_coding_agent.prompt_editor import PromptTextArea
 from pi_coding_agent.session_manager import SessionManager
@@ -630,5 +630,12 @@ class TestPiApp:
 
 
 def test_console_output_sink_is_the_default_for_a_plain_session(tmp_path: Path) -> None:
+    """A plain session (no explicit `output=`, what the classic REPL
+    constructs) still ends up backed by a real ConsoleOutputSink — wrapped
+    in FooterAwareOutputSink now, which keeps the mid-turn status footer
+    visible (see TestMidTurnFooterVisibility in test_interactive_mode.py)
+    but still forwards every print straight to the console underneath,
+    same as before that wrapper existed."""
     session = _make_session(tmp_path)
-    assert isinstance(session._output, ConsoleOutputSink)
+    assert isinstance(session._output, FooterAwareOutputSink)
+    assert isinstance(session._output._inner, ConsoleOutputSink)

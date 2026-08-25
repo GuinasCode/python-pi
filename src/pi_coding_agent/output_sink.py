@@ -13,6 +13,7 @@ into a transcript widget instead.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from rich.console import Console, RenderableType
@@ -54,6 +55,35 @@ class ConsoleOutputSink:
         # crop/pad buffer flush does — the intermittent line truncation this
         # fixes.
         self._console.print(renderable, soft_wrap=False)
+
+
+class FooterAwareOutputSink:
+    """Wraps another OutputSink, calling `before` immediately before
+    each print and `after` immediately after. The classic REPL uses
+    this to keep its status footer (session/mode info, pinned to the
+    bottom of the terminal) visible for the whole turn — thinking,
+    streaming text, running tools — not just while the input box itself
+    is on screen: `before` erases the footer so the new line lands where
+    it would have anyway, `after` redraws it below whatever just
+    printed, so the two never end up interleaved or duplicated on the
+    screen. Both hooks are no-ops outside a turn (see
+    InteractiveSession._footer_active), so slash-command output and
+    other non-turn prints are completely unaffected."""
+
+    def __init__(self, inner: OutputSink, *, before: Callable[[], None], after: Callable[[], None]) -> None:
+        self._inner = inner
+        self._before = before
+        self._after = after
+
+    def print(self, markup: str = "", *, end: str = "\n") -> None:
+        self._before()
+        self._inner.print(markup, end=end)
+        self._after()
+
+    def print_renderable(self, renderable: RenderableType) -> None:
+        self._before()
+        self._inner.print_renderable(renderable)
+        self._after()
 
 
 class NullOutputSink:

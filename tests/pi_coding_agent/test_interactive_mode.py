@@ -933,6 +933,150 @@ class TestFooterDoesNotDuplicate:
         assert rendered.count("shift+tab to cycle") == 3, rendered
 
 
+class TestMidTurnFooterVisibility:
+    """The status footer (session/mode info) used to only exist while
+    the input box itself was on screen — invisible for the whole
+    thinking/streaming/tool-running part of a turn. _begin_turn_footer/
+    _end_turn_footer plus FooterAwareOutputSink keep it drawn (and
+    live-updating) for the entire turn instead."""
+
+    def test_begin_and_end_turn_footer_toggle_state(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        session = _make_session(tmp_path)
+        assert not session._footer_active
+        assert not session._footer_on_screen
+
+        monkeypatch.setattr("sys.stdout", io.StringIO())
+        session._begin_turn_footer()
+        assert session._footer_active
+        assert session._footer_on_screen
+
+        session._end_turn_footer()
+        assert not session._footer_active
+        assert not session._footer_on_screen
+
+    def test_output_print_is_unaffected_when_no_turn_is_active(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Slash-command output (and anything else printed outside a
+        turn) must not suddenly grow a footer underneath it."""
+        session = _make_session(tmp_path)
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._output.print("some slash-command output")
+        assert "shift+tab to cycle" not in fake_stdout.getvalue()
+        assert not session._footer_on_screen
+
+    def test_output_print_during_a_turn_keeps_exactly_one_footer_on_screen(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=60, force_terminal=True))
+        session = _make_session(tmp_path)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._begin_turn_footer()
+        session._output.print("tool call output, mid-turn")
+        session._output.print("more output, mid-turn")
+        # Snapshot while the footer is still active — _end_turn_footer
+        # (below) erases it for good, same as repl_loop does once a turn
+        # actually ends, so checking post-erase would just confirm it's
+        # gone, not that it stayed visible *during* the turn.
+        mid_turn_stream = fake_stdout.getvalue()
+        session._end_turn_footer()
+
+        term = _VirtualTerminal()
+        term.feed(mid_turn_stream)
+        rendered = term.rendered_text()
+        assert "tool call output, mid-turn" in rendered
+        assert "more output, mid-turn" in rendered
+        # erased-then-redrawn around each print — never duplicated
+        # across the sequence, always exactly one copy on screen.
+        assert rendered.count("shift+tab to cycle") == 1, rendered
+
+    def test_status_change_during_a_turn_refreshes_the_visible_footer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The state line reflects self._status live — not just at the
+        moment the footer was first drawn — since _refresh_status_footer
+        is wired as _on_status_change."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=60, force_terminal=True))
+        session = _make_session(tmp_path)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._begin_turn_footer()
+        session._status = "running: bash"
+        session._refresh_status_footer()
+        mid_turn_stream = fake_stdout.getvalue()  # snapshot before _end_turn_footer erases it
+        session._end_turn_footer()
+
+        term = _VirtualTerminal()
+        term.feed(mid_turn_stream)
+        rendered = term.rendered_text()
+        assert "running: bash" in rendered
+
+    def test_real_turn_keeps_the_footer_visible_around_the_reply(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End-to-end: a real run_turn() call (faux provider) with the
+        turn footer active around it — the reply text and the footer
+        both land on screen, footer exactly once, and it's cleanly gone
+        afterward (matching what repl_loop itself now does)."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=60, force_terminal=True))
+        session = _make_session(tmp_path)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._begin_turn_footer()
+        asyncio.run(session.run_turn("hello"))
+        mid_turn_stream = fake_stdout.getvalue()  # snapshot before _end_turn_footer erases it
+        session._end_turn_footer()
+
+        assert not session._footer_on_screen
+        assert not session._footer_active
+
+        term = _VirtualTerminal()
+        term.feed(mid_turn_stream)
+        rendered = term.rendered_text()
+        assert "hello from interactive" in rendered
+        assert rendered.count("shift+tab to cycle") == 1, rendered
+
+    def test_erase_footer_does_not_eat_the_line_printed_just_before_it(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression test for an off-by-one in the erase math: moving
+        up one row too many landed on the real content line printed
+        right before the footer (not the blank spacer row above it) and
+        wiped it out along with the footer itself. Feeds the *entire*
+        stream — begin, two prints, end — through the virtual terminal
+        and checks both printed lines survive the final erase, with no
+        trace of the footer left behind either."""
+        import pi_coding_agent.interactive_mode as interactive_mode
+
+        monkeypatch.setattr(interactive_mode, "_console", Console(width=60, force_terminal=True))
+        session = _make_session(tmp_path)
+
+        fake_stdout = io.StringIO()
+        monkeypatch.setattr("sys.stdout", fake_stdout)
+        session._begin_turn_footer()
+        session._output.print("first line printed mid-turn")
+        session._output.print("second line printed mid-turn")
+        session._end_turn_footer()
+
+        term = _VirtualTerminal()
+        term.feed(fake_stdout.getvalue())
+        rendered = term.rendered_text()
+        assert "first line printed mid-turn" in rendered
+        assert "second line printed mid-turn" in rendered
+        assert "shift+tab to cycle" not in rendered  # cleanly erased, not left behind
+
+
 class TestPromptHistory:
     """Up/Down recalling prior submitted lines (pi_tui.raw_input's own
     tests cover the actual navigation logic) — here just the REPL-side

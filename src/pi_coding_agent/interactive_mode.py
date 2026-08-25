@@ -45,7 +45,7 @@ from pi_coding_agent.extension_ui import ExtensionUIContext, NoopExtensionUICont
 from pi_coding_agent.extensions import ExtensionRunner
 from pi_coding_agent.git_info import get_git_repo_line
 from pi_coding_agent.markdown_render import LeftMarkdown as Markdown
-from pi_coding_agent.output_sink import ConsoleOutputSink, OutputSink
+from pi_coding_agent.output_sink import ConsoleOutputSink, FooterAwareOutputSink, OutputSink
 from pi_coding_agent.permission_mode import (
     PermissionDecision,
     PermissionMode,
@@ -124,6 +124,17 @@ def _fmt_result_preview(text: str, max_lines: int = 8) -> str:
     if len(lines) > max_lines:
         preview_lines.append(f"  [dim]... ({len(lines) - max_lines} more lines)[/dim]")
     return "\n".join(preview_lines)
+
+
+def _visible_row_count(markup: str, width: int) -> int:
+    """How many terminal rows one logical `markup` line occupies once
+    auto-wrapped at `width` — shared by _prompt_input's live footer and
+    InteractiveSession's mid-turn status footer, so both count wrapped
+    rows (e.g. a long model id pushing the state line past one row)
+    identically instead of two independently-maintained copies of this
+    math drifting apart."""
+    visible_len = len(Text.from_markup(markup).plain)
+    return max(1, -(-max(visible_len, 1) // width))
 
 
 # ---------------------------------------------------------------------------
@@ -242,11 +253,33 @@ class InteractiveSession:
         self._model = model
         self._cwd = cwd
         self._config_dir = config_dir or get_config_dir()
+        # Mid-turn status footer state (session/mode info pinned to the
+        # bottom of the terminal, kept visible for the whole turn — see
+        # _begin_turn_footer/_end_turn_footer/_footer_before_output/
+        # _footer_after_output below). Set before constructing self._output
+        # since FooterAwareOutputSink is handed bound methods that read
+        # these attributes, even though they're not called until later.
+        self._footer_active = False
+        self._footer_on_screen = False
+        self._footer_row_count = 0
+
         # Where run_turn()/_handle_command() render to. Defaults to the
         # classic REPL's Console — the Textual app (--ui-mode fullscreen)
         # passes its own sink so the exact same event/command handling
-        # renders into a transcript widget instead of straight to stdout.
-        self._output: OutputSink = output or ConsoleOutputSink(_console)
+        # renders into a transcript widget instead of straight to stdout,
+        # and already keeps its footer visible natively via Textual's own
+        # docked-widget layout, so it gets the plain console sink, not the
+        # footer-aware wrapper (which exists to fake that for a raw
+        # terminal).
+        self._output: OutputSink = (
+            output
+            if output is not None
+            else FooterAwareOutputSink(
+                ConsoleOutputSink(_console),
+                before=self._footer_before_output,
+                after=self._footer_after_output,
+            )
+        )
         # How _permission_gate's "ask" decision actually asks. Defaults to
         # the REPL's blocking y/N input() prompt; the Textual app (Phase
         # T2) swaps this for an async modal dialog instead, since a
@@ -316,10 +349,13 @@ class InteractiveSession:
         # Phase T6: called whenever _handle_event has just processed an
         # event (i.e. self._status may have changed) — PiApp uses this to
         # refresh its footer live during a turn (thinking/running tool/
-        # ready), instead of only at submission start/end. None in the
-        # classic REPL, which prints its status line directly rather than
-        # keeping a persistent footer to refresh.
-        self._on_status_change: Callable[[], None] | None = None
+        # ready), instead of only at submission start/end. The classic
+        # REPL wires the same idea to its own mid-turn footer (see
+        # _refresh_status_footer) so "running: bash" etc. appear the
+        # instant the status changes, not only the next time something
+        # happens to print; still None when an external sink was
+        # supplied (fullscreen/tests own their own status refresh).
+        self._on_status_change: Callable[[], None] | None = None if output is not None else self._refresh_status_footer
 
     def _cycle_permission_mode(self) -> None:
         self._permission_mode = cycle_permission_mode(self._permission_mode)
@@ -350,8 +386,16 @@ class InteractiveSession:
         return await self._confirm_tool_fn(tool_name, args)
 
     async def _confirm_tool(self, tool_name: str, args: dict[str, Any]) -> bool:
-        """Ask the user to approve a single mutating tool call (y/N)."""
+        """Ask the user to approve a single mutating tool call (y/N).
+
+        Prints straight to `_console`, bypassing self._output/
+        FooterAwareOutputSink — so the mid-turn status footer (if
+        active) is erased first and redrawn after, the same way the
+        wrapped sink handles every other print during a turn, just done
+        by hand here since this one call site talks to the console
+        directly (it needs blocking input(), not just a print)."""
         args_str = _fmt_args(args)
+        self._footer_before_output()
         _console.print(
             f"[{PASTEL_YELLOW}]?[/{PASTEL_YELLOW}] Allow [bold]{escape(tool_name)}[/bold]({args_str})? "
             "[dim](y/N)[/dim]",
@@ -362,6 +406,8 @@ class InteractiveSession:
             answer = await loop.run_in_executor(None, input)
         except (EOFError, KeyboardInterrupt):
             answer = "n"
+        finally:
+            self._footer_after_output()
         return answer.strip().lower() in ("y", "yes")
 
     async def _soul_yes_no(self, prompt_text: str) -> bool:
@@ -1086,6 +1132,96 @@ class InteractiveSession:
             return None
         return f"[{DIM_STYLE}]{escape(line)}[/{DIM_STYLE}]"
 
+    def _footer_lines(self) -> list[str]:
+        lines = [self._state_line(), self._mode_line()]
+        repo_line = self._repo_line()
+        if repo_line:
+            lines.append(repo_line)
+        return lines
+
+    def _draw_footer(self) -> None:
+        """Print the rule + state/mode[/repo] lines at the current
+        cursor position and remember how many rows they occupy, so a
+        later _erase_footer removes exactly that many — no more, no
+        less. Safe to call while already on screen (erases the stale
+        copy first) since _footer_before_output/_footer_after_output can
+        otherwise fire back-to-back for adjacent prints."""
+        if self._footer_on_screen:
+            self._erase_footer()
+        w = _console.width
+        lines = self._footer_lines()
+        with _console.capture() as capture:
+            _console.print(("─" * w) + "\n" + "\n".join(lines), end="")
+        sys.stdout.write("\r\n" + capture.get().replace("\n", "\r\n"))
+        sys.stdout.flush()
+        # +1 for the rule itself, on top of however many rows each footer
+        # line wraps to at the current terminal width (see
+        # _visible_row_count — the same wrap-counting _prompt_input's own
+        # live footer uses, so both agree on what "one row" means).
+        self._footer_row_count = 1 + sum(_visible_row_count(line, w) for line in lines)
+        self._footer_on_screen = True
+
+    def _erase_footer(self) -> None:
+        if not self._footer_on_screen:
+            return
+        # _draw_footer starts from a blank row (the cursor's row right
+        # after a normal print's trailing "\n") and moves down exactly
+        # `_footer_row_count` rows via its own leading "\r\n" plus one
+        # "\r\n" between each footer line — landing on the *last* footer
+        # row, not one past it (its final line has no trailing newline).
+        # Moving up that same `_footer_row_count` retraces those exact
+        # row transitions back to the blank starting row — one row less
+        # than that would leave the footer's own last line behind; one
+        # row more would walk past the blank row into the real content
+        # printed just before it and clear that too (the bug this
+        # comment replaces: a fencepost off-by-one here silently ate the
+        # line printed immediately before the footer on every redraw).
+        rows = self._footer_row_count
+        sys.stdout.write(f"\x1b[{rows}A\r\x1b[0J")
+        sys.stdout.flush()
+        self._footer_on_screen = False
+
+    def _begin_turn_footer(self) -> None:
+        """Call once, right before a turn starts — makes the status
+        footer part of the display (spec: "sempre visível") for the
+        whole turn, not just while the input box is on screen."""
+        self._footer_active = True
+        self._draw_footer()
+
+    def _end_turn_footer(self) -> None:
+        """Call once, right after a turn ends — removes the footer so
+        _prompt_input's own (independent, unchanged) live footer takes
+        over cleanly for the next input cycle instead of leaving two
+        copies on screen."""
+        self._erase_footer()
+        self._footer_active = False
+
+    def _footer_before_output(self) -> None:
+        """FooterAwareOutputSink's `before` hook — a no-op outside a
+        turn (_footer_active is only True between _begin_turn_footer and
+        _end_turn_footer), so slash-command output and anything else
+        printed through self._output when no turn is running is
+        completely unaffected."""
+        if self._footer_active:
+            self._erase_footer()
+
+    def _footer_after_output(self) -> None:
+        """FooterAwareOutputSink's `after` hook — redraws the footer
+        immediately below whatever was just printed, keeping it pinned
+        to the bottom of the growing transcript rather than left behind
+        above new output."""
+        if self._footer_active:
+            self._draw_footer()
+
+    def _refresh_status_footer(self) -> None:
+        """Wired as self._on_status_change — redraws the footer in place
+        whenever self._status changes (e.g. "thinking..." -> "running:
+        bash" -> "thinking..." -> "ready"), so the state line is live
+        even between prints, not just refreshed as a side effect of the
+        next thing that happens to print."""
+        if self._footer_active:
+            self._draw_footer()
+
     async def _prompt_input(self) -> str | None:
         """Draw the bordered input area with a live footer, return stripped text or None on exit.
 
@@ -1143,20 +1279,21 @@ class InteractiveSession:
         def _line_rows(markup: str) -> int:
             """How many terminal rows printing one *logical* line of
             `markup` (rich markup, followed by a newline) actually
-            occupies once the terminal auto-wraps it at width `w` — 1
-            unless its visible (tag-stripped) length exceeds `w`, in
-            which case every extra full width's worth of overflow forces
-            another. state_line in particular (status + provider/model +
-            session id all on one line) routinely runs long enough to
-            wrap on its own once a longer model id is active, and
-            footer_rows treating every footer line as exactly one row
+            occupies once the terminal auto-wraps it at width `w` (see
+            module-level `_visible_row_count`, which does the actual
+            math) — 1 unless its visible (tag-stripped) length exceeds
+            `w`, in which case every extra full width's worth of
+            overflow forces another. state_line in particular (status +
+            provider/model + session id all on one line) routinely runs
+            long enough to wrap on its own once a longer model id is
+            active, and footer_rows treating every footer line as
+            exactly one row
             regardless used to under-count whenever that happened — the
             following render's move-up then landed short of the input's
             actual first row, leaving it only partially cleared and
             visibly duplicated below the stale remainder.
             """
-            visible_len = len(Text.from_markup(markup).plain)
-            return max(1, -(-max(visible_len, 1) // w))
+            return _visible_row_count(markup, w)
 
         def _row_col_after(n: int) -> tuple[int, int]:
             """0-indexed row and 1-indexed column of the position right
@@ -1308,7 +1445,16 @@ class InteractiveSession:
             _console.print()
             self._print_user_message(user_input)
             self._status = "thinking..."
-            result = await self.run_turn(user_input)
+            # Keep the status footer on screen for the whole turn — not
+            # just while the input box is up — so it stays visible while
+            # the assistant thinks/streams/runs tools, ending only once
+            # the turn is over (_end_turn_footer, in `finally`, so a
+            # mid-turn exception can't leave a stale footer behind).
+            self._begin_turn_footer()
+            try:
+                result = await self.run_turn(user_input)
+            finally:
+                self._end_turn_footer()
             self._status = "ready"
             _console.print()
 
