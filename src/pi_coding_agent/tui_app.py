@@ -30,16 +30,15 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.markup import escape
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import VerticalScroll
+from textual.containers import VerticalGroup, VerticalScroll
 from textual.theme import Theme
 from textual.widgets import OptionList, Static
 
-from pi_ai import StopReason
 from pi_coding_agent.autocomplete import command_suggestions
 from pi_coding_agent.dialogs import ConfirmDialog, InputDialog, SelectDialog
 from pi_coding_agent.extension_ui import AutocompleteProvider
@@ -113,7 +112,7 @@ class TextualExtensionUIContext:
         self._app._set_slot("#ext-header", content)
 
     def set_footer(self, content: RenderableType | str | None) -> None:
-        self._app._set_slot("#ext-footer", content)
+        self._app.query_one("#app-footer", AppFooter).set_extension(content)
 
     def set_title(self, title: str | None) -> None:
         self._app.title = title or ""
@@ -146,6 +145,85 @@ class TextualExtensionUIContext:
         self._app.query_one("#prompt-input", PromptTextArea).insert(text)
 
 
+class AppFooter(Static):
+    """The single structural footer region — always mounted, always
+    visible, never toggled or torn down. Replaces what used to be two
+    independent docked widgets (``#status-footer`` for live session
+    status, ``#ext-footer`` for extension-supplied content) competing for
+    the same screen real estate: one could be showing while the other
+    was hidden, both could end up stacked with their own separate
+    borders/backgrounds, and nothing about their layout expressed that
+    they were really one region. Live status (``set_status``, called by
+    ``PiApp._update_footer``) and extension content (``set_extension``,
+    called by ``TextualExtensionUIContext.set_footer``) are two inputs
+    into ONE rendered widget instead — never two boxes.
+
+    ``height: auto`` plus a CSS ``border`` (not manually printed ``─``
+    characters — Textual's own box model draws all four edges, sized to
+    the actual content) is what makes the height intrinsic: 1 status
+    line renders as a 3-row box (line + top/bottom border), 2 lines as
+    4 rows, and so on, with no fixed ``height: N`` anywhere to fight
+    with real content — the fixed ``height: 2`` this replaces is exactly
+    what made a 3-line status get silently clipped."""
+
+    DEFAULT_CSS = """
+    AppFooter {
+        width: 100%;
+        height: auto;
+        border: solid $accent;
+        padding: 0 1;
+        background: $panel;
+    }
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__("", markup=True, **kwargs)
+        self._status_content: RenderableType = ""
+        self._extension_content: RenderableType | None = None
+
+    # set_status/set_extension each end with their own direct call to
+    # self.update(...) — deliberately not both routed through one shared
+    # "recompute and update" helper. That refactor was tried first and
+    # silently broke real rendering in this Textual version:
+    # Static.render_line() came back blank on every row (verified with a
+    # minimal repro outside this app entirely — a bare Static subclass
+    # with the same border CSS) even though .content/.visual still
+    # showed the right text, purely from moving the same self.update(...)
+    # call one indirection layer away from the setter that decided the
+    # new content. Some interaction with Static's internal render/style
+    # cache, not anything specific to Group or to this widget's own
+    # state — a small amount of duplication between these two methods is
+    # the trade for not depending on that fragile behavior.
+
+    def set_status(self, content: RenderableType) -> None:
+        """Live session status — provider/model, session id, permission
+        mode, etc. (``PiApp._update_footer``, wired as
+        ``InteractiveSession._on_status_change``). Re-renders in place:
+        no widget is added, removed, or remounted."""
+        self._status_content = content
+        if self._extension_content is None:
+            self.update(self._status_content)
+        else:
+            self.update(Group(self._status_content, self._extension_content))
+
+    def set_extension(self, content: RenderableType | None) -> None:
+        """Extension-supplied footer content (``ctx.ui.set_footer`` ->
+        ``TextualExtensionUIContext.set_footer``). ``None`` removes it —
+        the footer itself never disappears, only this piece of its
+        content does, and the status content above it is unaffected."""
+        self._extension_content = content
+        if content is None:
+            self.update(self._status_content)
+        else:
+            # rich.console.Group stacks arbitrary renderables (markup
+            # strings included — Static's own str/RenderableType duality
+            # doesn't extend to combining two of them, but Group does)
+            # top to bottom with no manual line-counting needed here; the
+            # footer's height: auto CSS picks up however tall that
+            # combined render ends up being.
+            self.update(Group(self._status_content, content))
+
+
 class PiApp(App[None]):
     """Alt-screen Textual front-end for an InteractiveSession."""
 
@@ -161,34 +239,23 @@ class PiApp(App[None]):
         background: $panel;
         display: none;
     }
-    #status-footer {
+    #bottom-bar {
         dock: bottom;
-        height: 2;
-        padding: 0 1;
-        background: $panel;
-    }
-    #ext-footer {
-        dock: bottom;
+        width: 100%;
         height: auto;
-        padding: 0 1;
-        background: $panel;
-        display: none;
     }
     #ext-widget {
-        dock: bottom;
         height: auto;
         padding: 0 1;
         display: none;
     }
     #suggestions {
-        dock: bottom;
         height: auto;
         max-height: 6;
         border: solid $accent;
         display: none;
     }
     #prompt-input {
-        dock: bottom;
         height: auto;
         min-height: 3;
         max-height: 12;
@@ -220,15 +287,32 @@ class PiApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Static(id="ext-header")
         yield VerticalScroll(id="transcript")
-        yield Static(id="status-footer")
-        yield Static(id="ext-footer")
-        yield Static(id="ext-widget")
-        yield OptionList(id="suggestions")
-        yield PromptTextArea(id="prompt-input")
+        # A single widget docked to the bottom edge, everything below the
+        # transcript stacked *inside* it via normal top-to-bottom flow
+        # layout — not each docked to the edge individually. Textual's
+        # dock positions every docked sibling independently flush against
+        # its edge (see _arrange_dock_widgets in textual/_arrange.py: each
+        # one gets `height - widget_height`, with no accumulated offset
+        # between same-edge siblings) — so the *previous* layout, where
+        # app-footer/ext-widget/suggestions/prompt-input were each
+        # `dock: bottom` in their own right, had them all physically
+        # overlapping at the screen's bottom edge, with only DOM paint
+        # order (prompt-input last, so drawn on top) making that
+        # invisible day to day. One dock + real flow layout inside it is
+        # what actually guarantees no overlap, not a fragile paint-order
+        # coincidence.
+        with VerticalGroup(id="bottom-bar"):
+            yield AppFooter(id="app-footer")
+            yield Static(id="ext-widget")
+            yield OptionList(id="suggestions")
+            yield PromptTextArea(id="prompt-input")
 
     def _set_slot(self, selector: str, content: RenderableType | str | None) -> None:
-        """Phase H: shared show/hide logic for the ext-header/ext-footer/
-        ext-widget slots — ``content=None`` hides the slot again."""
+        """Phase H: shared show/hide logic for the ext-header/ext-widget
+        slots — ``content=None`` hides the slot again. NOT used for the
+        footer: AppFooter is a single structural region that's always
+        visible and never display-toggled — see set_footer above, which
+        calls AppFooter.set_extension instead."""
         widget = self.query_one(selector, Static)
         if content is None:
             widget.display = False
@@ -273,8 +357,8 @@ class PiApp(App[None]):
 
     def _update_footer(self) -> None:
         mode_label = permission_mode_label(self._session._permission_mode)
-        footer = self.query_one("#status-footer", Static)
-        footer.update(f"{self._session._state_line()}\n{mode_label} [dim](shift+tab to cycle)[/dim]")
+        status = f"{self._session._state_line()}\n{mode_label} [dim](shift+tab to cycle)[/dim]"
+        self.query_one("#app-footer", AppFooter).set_status(status)
 
     def action_cycle_permission_mode(self) -> None:
         self._session._cycle_permission_mode()
@@ -425,11 +509,13 @@ class PiApp(App[None]):
 
         self._turn_in_progress = True
         try:
-            result = await self._session.run_turn(text)
+            # No separate error print here: InteractiveSession._handle_event
+            # already appends an "error: ..." line to the transcript via
+            # the "error" event (see AgentSession._consume_stream, which
+            # both emits that event *and* returns it as run_turn's
+            # result) — printing it again here off result.stop_reason
+            # duplicated every single error, back to back.
+            await self._session.run_turn(text)
         finally:
             self._turn_in_progress = False
         self._update_footer()
-        if result is not None and result.stop_reason == StopReason.ERROR:
-            error_msg = result.error_message or "Unknown error"
-            transcript.mount(Static(f"[red]error:[/red] {error_msg}", markup=True))
-            transcript.scroll_end(animate=False)

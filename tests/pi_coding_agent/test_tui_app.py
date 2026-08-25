@@ -25,7 +25,7 @@ from pi_coding_agent.output_sink import ConsoleOutputSink, FooterAwareOutputSink
 from pi_coding_agent.permission_mode import PermissionMode
 from pi_coding_agent.prompt_editor import PromptTextArea
 from pi_coding_agent.session_manager import SessionManager
-from pi_coding_agent.tui_app import PiApp, _TranscriptSink
+from pi_coding_agent.tui_app import AppFooter, PiApp, _TranscriptSink
 
 
 def _make_session(tmp_path: Path, responses: list[Any] | None = None) -> InteractiveSession:
@@ -61,6 +61,43 @@ def _transcript_text(app: PiApp) -> str:
         if isinstance(child, Static):
             console.print(child.content)
     return console.export_text()
+
+
+def _footer_text(app: PiApp) -> str:
+    """Plain text of the unified footer's *stored* content — it's not
+    always a bare string (AppFooter.set_extension wraps it in a
+    rich.console.Group once extension content is present), so render it
+    through a recording Console the same way _transcript_text does.
+
+    This checks what AppFooter was TOLD to show, not what actually ends
+    up painted on screen — see _footer_screen_text, which checks the
+    latter and is the one that would have caught the real regression
+    this class guards against (below)."""
+    footer = app.query_one("#app-footer", AppFooter)
+    console = Console(record=True, width=100, file=io.StringIO())
+    console.print(footer.content)
+    return console.export_text()
+
+
+def _footer_screen_text(app: PiApp) -> str:
+    """Plain text of what the footer widget actually paints, row by row,
+    via the same Widget.render_line Textual's own compositor calls to
+    put pixels on screen — as opposed to _footer_text, which only checks
+    the renderable AppFooter was *given* (``.content``).
+
+    That distinction mattered for real: an earlier version of AppFooter
+    routed set_status/set_extension through one shared internal "compute
+    the combined renderable, then self.update(...)" helper method.
+    ``.content``/``.visual`` still reported the right text with that
+    version — but ``render_line`` came back blank on every row, a real
+    on-screen regression _footer_text alone could not see. Asserting
+    against this function anywhere multiline/extension footer content is
+    checked is what actually guards against that regressing again."""
+    footer = app.query_one("#app-footer", AppFooter)
+    lines = [
+        "".join(segment.text for segment in footer.render_line(y)) for y in range(footer.outer_size.height)
+    ]
+    return "\n".join(lines)
 
 
 async def _settle(app: PiApp, pilot: Pilot[None]) -> None:
@@ -290,7 +327,7 @@ class TestPiApp:
             # a real state change at runtime, just a static-analysis gap.
             assert session._permission_mode == PermissionMode.ACCEPT_EDITS  # type: ignore[comparison-overlap]
 
-            footer = app.query_one("#status-footer", Static)
+            footer = app.query_one("#app-footer", AppFooter)
             assert "accept edits on" in str(footer.content)
 
     @pytest.mark.asyncio
@@ -501,10 +538,16 @@ class TestPiApp:
         app = PiApp(session)
         async with app.run_test() as pilot:
             header = app.query_one("#ext-header", Static)
-            footer = app.query_one("#ext-footer", Static)
+            footer = app.query_one("#app-footer", AppFooter)
             widget = app.query_one("#ext-widget", Static)
             assert header.display is False
-            assert footer.display is False
+            # Unlike header/widget, the footer is never hidden — it's the
+            # one always-visible structural region (see AppFooter's
+            # docstring) — so before the extension runs it's already
+            # displayed, just showing session status with no extension
+            # content in it yet.
+            assert footer.display is True
+            assert "custom footer" not in _footer_text(app)
             assert widget.display is False
 
             input_widget = app.query_one("#prompt-input", PromptTextArea)
@@ -514,8 +557,11 @@ class TestPiApp:
 
             assert header.display is True
             assert str(header.content) == "custom header"
+            # set_footer() must land its content *inside* the same
+            # structural footer widget, alongside the live status line —
+            # never a second, independent footer box.
             assert footer.display is True
-            assert str(footer.content) == "custom footer"
+            assert "custom footer" in _footer_text(app)
             assert widget.display is True
             assert str(widget.content) == "custom widget"
             assert app.title == "custom title"
@@ -700,6 +746,232 @@ class TestPiApp:
             tool_results = [m for m in session._agent_session._messages if getattr(m, "role", "") == "toolResult"]
             assert len(tool_results) == 1
             assert tool_results[0].is_error is True
+
+
+class TestAppFooter:
+    """Structural-footer invariants — see AppFooter's docstring
+    (tui_app.py) for the "why": one always-visible region, intrinsic
+    (content + border) height, no fixed `height: N`, no on_mount-cached
+    sizing, and extension content merged into the same widget rather
+    than a second competing footer."""
+
+    @pytest.mark.asyncio
+    async def test_exactly_one_footer_is_visible_on_mount(self, tmp_path: Path) -> None:
+        """Teste 1 — sempre presente."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test():
+            footers = app.query(AppFooter)
+            assert len(footers) == 1
+            assert footers.first().display is True
+            # The old two-widget split is gone outright, not just hidden.
+            assert len(app.query("#status-footer")) == 0
+            assert len(app.query("#ext-footer")) == 0
+
+    @pytest.mark.asyncio
+    async def test_footer_height_grows_and_shrinks_with_content_lines(self, tmp_path: Path) -> None:
+        """Teste 2 — altura dinâmica: N content lines -> N+2 rows (top +
+        bottom border), for 1, 2, and 4 lines — never a fixed height."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer = app.query_one(AppFooter)
+
+            footer.set_status("one line")
+            await pilot.pause()
+            assert footer.outer_size.height == 3
+
+            footer.set_status("line one\nline two")
+            await pilot.pause()
+            assert footer.outer_size.height == 4
+
+            footer.set_status("line one\nline two\nline three\nline four")
+            await pilot.pause()
+            assert footer.outer_size.height == 6
+
+            # And back down again — it's not a high-water mark.
+            footer.set_status("one line")
+            await pilot.pause()
+            assert footer.outer_size.height == 3
+
+    @pytest.mark.asyncio
+    async def test_multiline_status_is_rendered_in_full_without_truncation(self, tmp_path: Path) -> None:
+        """Teste 3 — conteúdo multiline. Checked against what's actually
+        painted (_footer_screen_text), not just what AppFooter was given
+        (_footer_text) — see that helper's docstring for why the
+        distinction matters."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer = app.query_one(AppFooter)
+            lines = [f"status line {i}" for i in range(5)]
+            footer.set_status("\n".join(lines))
+            await pilot.pause()
+
+            stored = _footer_text(app)
+            painted = _footer_screen_text(app)
+            for line in lines:
+                assert line in stored
+                assert line in painted
+            assert footer.outer_size.height == len(lines) + 2
+
+    @pytest.mark.asyncio
+    async def test_footer_content_is_actually_painted_not_just_stored(self, tmp_path: Path) -> None:
+        """Regression test: AppFooter.content (and .visual) reporting the
+        right renderable is not proof it's on screen — see
+        _footer_screen_text's docstring for the real bug this would have
+        caught (set_status/set_extension routed through a shared
+        "compute renderable, then self.update()" helper one call away
+        from the setter; .content stayed correct but render_line came
+        back blank on every row). Assert directly against what
+        Widget.render_line actually paints, for both status-only and
+        status+extension content."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer = app.query_one(AppFooter)
+
+            footer.set_status("hello world")
+            await pilot.pause()
+            assert "hello world" in _footer_screen_text(app)
+
+            footer.set_extension("extension line")
+            await pilot.pause()
+            painted = _footer_screen_text(app)
+            assert "hello world" in painted
+            assert "extension line" in painted
+
+    @pytest.mark.asyncio
+    async def test_status_transitions_update_the_same_footer_instance(self, tmp_path: Path) -> None:
+        """Teste 4 — atualização: ready -> thinking... -> running: bash ->
+        ready all land in the one footer widget, which is never rebuilt."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            footer = app.query_one(AppFooter)
+            for status in ("ready", "thinking...", "running: bash", "ready"):
+                session._status = status
+                app._update_footer()
+                await pilot.pause()
+                assert status in _footer_text(app)
+                assert app.query_one(AppFooter) is footer
+            assert len(app.query(AppFooter)) == 1
+
+    @pytest.mark.asyncio
+    async def test_extension_set_footer_lands_inside_the_structural_footer(self, tmp_path: Path) -> None:
+        """Teste 5 — extensão: ctx.ui.set_footer() content appears inside
+        the existing structural footer, alongside live status, and no
+        second footer widget is ever created."""
+        ext_dir = tmp_path / ".pi" / "extensions"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "chrome.py").write_text(
+            'def _handler(args_text, ctx):\n    ctx.ui.set_footer("custom footer")\n\n'
+            'def extension(pi):\n    pi.register_command("chrome", _handler)\n',
+            encoding="utf-8",
+        )
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test() as pilot:
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "/chrome"
+            await pilot.press("enter")
+            await _settle(app, pilot)
+
+            assert len(app.query(AppFooter)) == 1
+            assert len(app.query("#ext-footer")) == 0
+            text = _footer_text(app)
+            assert "custom footer" in text
+            # Live status is still there too — merged, not replaced.
+            assert "ready" in text
+            # And it's actually painted, not just stored — see
+            # _footer_screen_text's docstring.
+            painted = _footer_screen_text(app)
+            assert "custom footer" in painted
+            assert "ready" in painted
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 40), (160, 50)])
+    async def test_footer_and_layout_stay_correct_at_various_terminal_sizes(
+        self, tmp_path: Path, size: tuple[int, int]
+    ) -> None:
+        """Teste 9 (tamanhos obrigatórios) — footer visible, full viewport
+        width, and every region (transcript/footer/prompt) fits inside the
+        viewport with no overlap or overflow."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            width, height = size
+            footer = app.query_one(AppFooter)
+            transcript = app.query_one("#transcript", VerticalScroll)
+            prompt = app.query_one("#prompt-input", PromptTextArea)
+
+            assert footer.display is True
+            assert footer.outer_size.width == width
+            assert transcript.region.bottom <= height
+            assert footer.region.bottom <= height
+            assert prompt.region.bottom <= height
+            # Non-overlapping, top-to-bottom stacking order.
+            assert transcript.region.bottom <= footer.region.y
+            assert footer.region.bottom <= prompt.region.y
+
+    @pytest.mark.asyncio
+    async def test_footer_width_and_layout_recompute_on_terminal_resize(self, tmp_path: Path) -> None:
+        """Teste 10 — redimensionamento: a live resize (not just a
+        different size chosen once at app start) must reflow the footer's
+        width and the whole layout — nothing here may depend on a value
+        cached once in on_mount."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test(size=(80, 24)) as pilot:
+            footer = app.query_one(AppFooter)
+            await pilot.pause()
+            assert footer.outer_size.width == 80
+
+            await pilot.resize_terminal(120, 40)
+            await pilot.pause()
+            assert footer.outer_size.width == 120
+
+            await pilot.resize_terminal(60, 20)
+            await pilot.pause()
+            assert footer.outer_size.width == 60
+
+    @pytest.mark.asyncio
+    async def test_large_footer_shrinks_transcript_without_overflow_and_prompt_stays_usable(
+        self, tmp_path: Path
+    ) -> None:
+        """Teste 7 — footer grande: footer grows, transcript shrinks to
+        make room (never overflows the viewport), and the prompt is still
+        present, correctly positioned, and still accepts input."""
+        session = _make_session(tmp_path)
+        app = PiApp(session)
+        async with app.run_test(size=(80, 24)) as pilot:
+            footer = app.query_one(AppFooter)
+            transcript = app.query_one("#transcript", VerticalScroll)
+            prompt = app.query_one("#prompt-input", PromptTextArea)
+
+            footer.set_status("one line")
+            await pilot.pause()
+            small_transcript_height = transcript.size.height
+
+            footer.set_status("\n".join(f"status line {i}" for i in range(6)))
+            await pilot.pause()
+
+            # 6 content lines vs. 1 before: +5 lines, same top/bottom
+            # border either way, so the footer grows by exactly 5 rows —
+            # and the transcript (the only 1fr region) must give up
+            # exactly that much space, not more, not less.
+            assert footer.outer_size.height == 6 + 2
+            assert transcript.size.height == small_transcript_height - 5
+            assert transcript.size.height > 0
+            assert footer.region.bottom <= 24
+            assert prompt.region.bottom <= 24
+            assert transcript.region.bottom <= footer.region.y
+
+            input_widget = app.query_one("#prompt-input", PromptTextArea)
+            input_widget.text = "still usable"
+            await pilot.pause()
+            assert input_widget.text == "still usable"
 
 
 def test_console_output_sink_is_the_default_for_a_plain_session(tmp_path: Path) -> None:
